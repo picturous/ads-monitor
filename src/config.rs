@@ -1,11 +1,52 @@
 use crate::models::PlatformId;
 use std::env;
 
+/// Per-platform collection options (feature toggles + audience name filter).
+#[derive(Debug, Clone)]
+pub struct CollectOptions {
+    pub enable_audiences: bool,
+    pub enable_campaigns: bool,
+    /// Case-insensitive substring patterns; when non-empty, only audiences whose
+    /// name (or description) contains at least one pattern are loaded & expanded.
+    pub audience_filter: Vec<String>,
+}
+
+impl Default for CollectOptions {
+    fn default() -> Self {
+        Self {
+            enable_audiences: true,
+            enable_campaigns: true,
+            audience_filter: Vec::new(),
+        }
+    }
+}
+
+impl CollectOptions {
+    pub fn matches_audience(&self, name: &str, description: Option<&str>) -> bool {
+        if self.audience_filter.is_empty() {
+            return true;
+        }
+        let name_lc = name.to_ascii_lowercase();
+        let desc_lc = description.map(|d| d.to_ascii_lowercase());
+        self.audience_filter.iter().any(|pat| {
+            let p = pat.to_ascii_lowercase();
+            name_lc.contains(&p) || desc_lc.as_deref().is_some_and(|d| d.contains(&p))
+        })
+    }
+
+    pub fn has_audience_filter(&self) -> bool {
+        !self.audience_filter.is_empty()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub lookback_days: u32,
     pub concurrency: usize,
     pub timeout_secs: u64,
+    pub enable_audiences: bool,
+    pub enable_campaigns: bool,
+    pub audience_filter: Vec<String>,
     pub selected_platforms: Vec<PlatformId>,
     pub openai: Option<OpenAiConfig>,
     pub facebook: Option<FacebookConfig>,
@@ -19,6 +60,7 @@ pub struct AppConfig {
 pub struct OpenAiConfig {
     pub api_key: String,
     pub base_url: String,
+    pub options: CollectOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +69,7 @@ pub struct FacebookConfig {
     pub ad_account_ids: Vec<String>,
     pub api_version: String,
     pub base_url: String,
+    pub options: CollectOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +84,7 @@ pub struct GoogleAdsConfig {
     pub api_version: String,
     pub base_url: String,
     pub oauth_token_url: String,
+    pub options: CollectOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -49,12 +93,25 @@ pub struct TikTokConfig {
     pub advertiser_id: String,
     pub bc_id: Option<String>,
     pub base_url: String,
+    pub options: CollectOptions,
+}
+
+#[derive(Debug, Clone)]
+pub enum LineOaAuth {
+    /// Static long-lived or pre-issued channel access token.
+    AccessToken(String),
+    /// Issue & auto-refresh 15-minute stateless tokens via POST /oauth2/v3/token.
+    Stateless {
+        channel_id: String,
+        channel_secret: String,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct LineOaConfig {
-    pub channel_access_token: String,
+    pub auth: LineOaAuth,
     pub base_url: String,
+    pub options: CollectOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +120,7 @@ pub struct LineAdsConfig {
     pub secret_key: String,
     pub account_id: String,
     pub base_url: String,
+    pub options: CollectOptions,
 }
 
 fn env_non_empty(key: &str) -> Option<String> {
@@ -70,6 +128,35 @@ fn env_non_empty(key: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+fn env_bool(keys: &[&str], default: bool) -> bool {
+    for key in keys {
+        if let Some(raw) = env_non_empty(key) {
+            match raw.to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => return true,
+                "0" | "false" | "no" | "off" => return false,
+                _ => {}
+            }
+        }
+    }
+    default
+}
+
+fn parse_csv_patterns(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn env_audience_filter(keys: &[&str], fallback: &[String]) -> Vec<String> {
+    for key in keys {
+        if let Some(raw) = env_non_empty(key) {
+            return parse_csv_patterns(&raw);
+        }
+    }
+    fallback.to_vec()
 }
 
 fn strip_trailing_slash(url: String) -> String {
@@ -97,12 +184,23 @@ impl AppConfig {
             .unwrap_or(30)
             .max(1);
 
+        let enable_audiences = env_bool(&["ADS_MONITOR_ENABLE_AUDIENCES"], true);
+        let enable_campaigns = env_bool(&["ADS_MONITOR_ENABLE_CAMPAIGNS"], true);
+        let audience_filter = env_non_empty("ADS_MONITOR_AUDIENCE_FILTER")
+            .map(|s| parse_csv_patterns(&s))
+            .unwrap_or_default();
+
         let openai = env_non_empty("OPENAI_API_KEY").map(|api_key| OpenAiConfig {
             api_key,
             base_url: strip_trailing_slash(
                 env_non_empty("OPENAI_ADS_BASE_URL")
                     .unwrap_or_else(|| "https://api.ads.openai.com/v1".to_string()),
             ),
+            options: CollectOptions {
+                enable_audiences: env_bool(&["OPENAI_ENABLE_AUDIENCES"], enable_audiences),
+                enable_campaigns: false,
+                audience_filter: env_audience_filter(&["OPENAI_AUDIENCE_FILTER"], &audience_filter),
+            },
         });
 
         let facebook = match (
@@ -129,6 +227,20 @@ impl AppConfig {
                                 .or_else(|| env_non_empty("FACEBOOK_BASE_URL"))
                                 .unwrap_or_else(|| "https://graph.facebook.com".to_string()),
                         ),
+                        options: CollectOptions {
+                            enable_audiences: env_bool(
+                                &["META_ENABLE_AUDIENCES", "FACEBOOK_ENABLE_AUDIENCES"],
+                                enable_audiences,
+                            ),
+                            enable_campaigns: env_bool(
+                                &["META_ENABLE_CAMPAIGNS", "FACEBOOK_ENABLE_CAMPAIGNS"],
+                                enable_campaigns,
+                            ),
+                            audience_filter: env_audience_filter(
+                                &["META_AUDIENCE_FILTER", "FACEBOOK_AUDIENCE_FILTER"],
+                                &audience_filter,
+                            ),
+                        },
                     })
                 }
             }
@@ -165,6 +277,20 @@ impl AppConfig {
                         ),
                         oauth_token_url: env_non_empty("GOOGLE_OAUTH_TOKEN_URL")
                             .unwrap_or_else(|| "https://oauth2.googleapis.com/token".to_string()),
+                        options: CollectOptions {
+                            enable_audiences: env_bool(
+                                &["GOOGLE_ADS_ENABLE_AUDIENCES"],
+                                enable_audiences,
+                            ),
+                            enable_campaigns: env_bool(
+                                &["GOOGLE_ADS_ENABLE_CAMPAIGNS"],
+                                enable_campaigns,
+                            ),
+                            audience_filter: env_audience_filter(
+                                &["GOOGLE_ADS_AUDIENCE_FILTER"],
+                                &audience_filter,
+                            ),
+                        },
                     })
                 } else {
                     None
@@ -185,18 +311,46 @@ impl AppConfig {
                     env_non_empty("TIKTOK_BASE_URL")
                         .unwrap_or_else(|| "https://business-api.tiktok.com".to_string()),
                 ),
+                options: CollectOptions {
+                    enable_audiences: env_bool(&["TIKTOK_ENABLE_AUDIENCES"], enable_audiences),
+                    enable_campaigns: env_bool(&["TIKTOK_ENABLE_CAMPAIGNS"], enable_campaigns),
+                    audience_filter: env_audience_filter(
+                        &["TIKTOK_AUDIENCE_FILTER"],
+                        &audience_filter,
+                    ),
+                },
             }),
             _ => None,
         };
 
-        let line_oa = env_non_empty("LINE_OA_CHANNEL_ACCESS_TOKEN").map(|channel_access_token| {
-            LineOaConfig {
-                channel_access_token,
-                base_url: strip_trailing_slash(
-                    env_non_empty("LINE_OA_BASE_URL")
-                        .unwrap_or_else(|| "https://api.line.me".to_string()),
+        let line_oa_auth = match (
+            env_non_empty("LINE_OA_CHANNEL_ID"),
+            env_non_empty("LINE_OA_CHANNEL_SECRET"),
+        ) {
+            (Some(channel_id), Some(channel_secret)) => Some(LineOaAuth::Stateless {
+                channel_id,
+                channel_secret,
+            }),
+            _ => env_non_empty("LINE_OA_CHANNEL_ACCESS_TOKEN").map(LineOaAuth::AccessToken),
+        };
+
+        let line_oa = line_oa_auth.map(|auth| LineOaConfig {
+            auth,
+            base_url: strip_trailing_slash(
+                env_non_empty("LINE_OA_BASE_URL")
+                    .unwrap_or_else(|| "https://api.line.me".to_string()),
+            ),
+            options: CollectOptions {
+                enable_audiences: env_bool(&["LINE_OA_ENABLE_AUDIENCES"], enable_audiences),
+                enable_campaigns: env_bool(
+                    &["LINE_OA_ENABLE_CAMPAIGNS", "LINE_OA_ENABLE_INSIGHTS"],
+                    enable_campaigns,
                 ),
-            }
+                audience_filter: env_audience_filter(
+                    &["LINE_OA_AUDIENCE_FILTER"],
+                    &audience_filter,
+                ),
+            },
         });
 
         let line_ads = match (
@@ -212,6 +366,14 @@ impl AppConfig {
                     env_non_empty("LINE_ADS_BASE_URL")
                         .unwrap_or_else(|| "https://ads.line.me".to_string()),
                 ),
+                options: CollectOptions {
+                    enable_audiences: env_bool(&["LINE_ADS_ENABLE_AUDIENCES"], enable_audiences),
+                    enable_campaigns: env_bool(&["LINE_ADS_ENABLE_CAMPAIGNS"], enable_campaigns),
+                    audience_filter: env_audience_filter(
+                        &["LINE_ADS_AUDIENCE_FILTER"],
+                        &audience_filter,
+                    ),
+                },
             }),
             _ => None,
         };
@@ -226,6 +388,9 @@ impl AppConfig {
             lookback_days,
             concurrency,
             timeout_secs,
+            enable_audiences,
+            enable_campaigns,
+            audience_filter,
             selected_platforms,
             openai,
             facebook,

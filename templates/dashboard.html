@@ -215,8 +215,11 @@ function allCampaigns() {
 function renderTop() {
   const s = DATA.summary || {};
   const demoTag = DATA.demo_mode ? ' · <span class="pill pr">DEMO MODE</span>' : '';
+  const filterTag = (DATA.audience_filter && DATA.audience_filter.length)
+    ? ` · <span class="pill nt">Filter: ${esc(DATA.audience_filter.join(', '))}</span>`
+    : '';
   document.getElementById('meta').innerHTML =
-    `Generated ${esc(fmtTime(DATA.generated_at))} · Lookback ${esc(DATA.lookback_days)}d${demoTag}`;
+    `Generated ${esc(fmtTime(DATA.generated_at))} · Lookback ${esc(DATA.lookback_days)}d${filterTag}${demoTag}`;
 
   const rb = document.getElementById('refresh');
   if (DATA.served) {
@@ -247,10 +250,14 @@ function renderTop() {
 
   const cards = [
     ['Platforms', `${s.healthy_platforms || 0}/${s.configured_platforms || 0}`, s.error_platforms ? `${s.error_platforms} error` : 'Configured & healthy'],
-    ['Audiences', s.total_audiences || 0, `${s.ready_audiences || 0} ready · ${s.failed_audiences || 0} failed`],
-    ['Operations', s.total_operations || 0, `${s.succeeded_operations || 0} ok · ${s.processing_operations || 0} running`],
-    ['Campaigns', s.total_campaigns || 0, `${s.active_campaigns || 0} active`],
   ];
+  if (DATA.audiences_enabled !== false) {
+    cards.push(['Audiences', s.total_audiences || 0, `${s.ready_audiences || 0} ready · ${s.failed_audiences || 0} failed`]);
+    cards.push(['Operations', s.total_operations || 0, `${s.succeeded_operations || 0} ok · ${s.processing_operations || 0} running`]);
+  }
+  if (DATA.campaigns_enabled !== false) {
+    cards.push(['Campaigns', s.total_campaigns || 0, `${s.active_campaigns || 0} active`]);
+  }
   document.getElementById('cards').innerHTML = cards.map(([l, v, sub]) =>
     `<div class="card"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${esc(sub)}</div></div>`
   ).join('');
@@ -265,8 +272,22 @@ function renderTop() {
   }
   document.getElementById('warnings').innerHTML = warns.map(w => `<div class="warn">${esc(w)}</div>`).join('');
 
-  document.getElementById('tabAud').textContent = `Audiences & Operations (${allAudiences().length})`;
-  document.getElementById('tabCamp').textContent = `Campaigns & Spend (${allCampaigns().length})`;
+  const audTab = document.getElementById('tabAud');
+  const campTab = document.getElementById('tabCamp');
+  audTab.textContent = `Audiences & Operations (${allAudiences().length})`;
+  campTab.textContent = `Campaigns & Spend (${allCampaigns().length})`;
+
+  const showAud = DATA.audiences_enabled !== false || allAudiences().length > 0;
+  const showCamp = DATA.campaigns_enabled !== false || allCampaigns().length > 0;
+  audTab.classList.toggle('hidden', !showAud);
+  campTab.classList.toggle('hidden', !showCamp);
+
+  if (activeTab === 'audiences' && !showAud && showCamp) activeTab = 'campaigns';
+  if (activeTab === 'campaigns' && !showCamp && showAud) activeTab = 'audiences';
+  audTab.classList.toggle('active', activeTab === 'audiences');
+  campTab.classList.toggle('active', activeTab === 'campaigns');
+  document.getElementById('sec-audiences').classList.toggle('hidden', activeTab !== 'audiences');
+  document.getElementById('sec-campaigns').classList.toggle('hidden', activeTab !== 'campaigns');
 }
 
 function renderPlatformCards() {
@@ -279,6 +300,10 @@ function renderPlatformCards() {
     const color = PLATFORM_COLORS[p.platform] || '#888';
     const acct = [p.account_name, p.account_id].filter(Boolean).join(' · ') || p.base_url;
     const m = p.metrics;
+
+    const audLabel = p.audiences_total_before_filter != null
+      ? `${p.audiences.length} / ${p.audiences_total_before_filter}`
+      : `${p.audiences.length}`;
 
     let body = '';
     if (p.status === 'unconfigured') {
@@ -293,22 +318,22 @@ function renderPlatformCards() {
         <div class="pm"><div class="k">Quota Used</div><div class="v">${fmtInt(m.quota_used)}${lim ? ' / ' + fmtInt(lim) : ''}</div></div>
         <div class="pm"><div class="k">Followers</div><div class="v">${fmtInt(m.followers)}</div></div>
         <div class="pm"><div class="k">Target Reach</div><div class="v">${fmtInt(m.targeted_reaches)}</div></div>
-        <div class="pm"><div class="k">Audiences</div><div class="v">${p.audiences.length}</div></div>
+        <div class="pm"><div class="k">Audiences</div><div class="v">${audLabel}</div></div>
       </div>${lim > 0 ? `<div class="qbar" title="${pct.toFixed(1)}% of monthly quota"><div class="qfill" style="width:${pct.toFixed(1)}%"></div></div>` : ''}`;
     } else if (m) {
       body = `<div class="pmgrid">
         <div class="pm"><div class="k">Spend (${esc(DATA.lookback_days)}d)</div><div class="v">${esc(fmtMoney(m.spend, m.currency))}</div></div>
         <div class="pm"><div class="k">${m.balance != null ? 'Balance' : 'Impressions'}</div><div class="v">${m.balance != null ? esc(fmtMoney(m.balance, m.currency)) : fmtInt(m.impressions)}</div></div>
         <div class="pm"><div class="k">Clicks / CTR</div><div class="v">${fmtInt(m.clicks)}${m.ctr != null ? ' · ' + fmtPct(m.ctr) : ''}</div></div>
-        <div class="pm"><div class="k">Audiences / Camp.</div><div class="v">${p.audiences.length} / ${p.campaigns.length}</div></div>
+        <div class="pm"><div class="k">Audiences / Camp.</div><div class="v">${audLabel} / ${p.campaigns.length}</div></div>
       </div>`;
     } else {
       const ops = p.audiences.reduce((n, a) => n + (a.operations || []).length, 0);
       body = `<div class="pmgrid">
-        <div class="pm"><div class="k">Audiences</div><div class="v">${p.audiences.length}</div></div>
+        <div class="pm"><div class="k">Audiences</div><div class="v">${audLabel}</div></div>
         <div class="pm"><div class="k">Operations</div><div class="v">${ops}</div></div>
         <div class="pm"><div class="k">Latency</div><div class="v">${p.duration_ms} ms</div></div>
-        <div class="pm"><div class="k">Policy Rev</div><div class="v mono">${esc((p.policy_revision || '—').slice(0, 10))}</div></div>
+        <div class="pm"><div class="k">${p.policy_revision ? 'Policy Rev' : 'Mode'}</div><div class="v mono">${esc(p.policy_revision ? p.policy_revision.slice(0, 10) : 'audiences only')}</div></div>
       </div>`;
     }
 

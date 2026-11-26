@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::time::Instant;
 
 const LIMIT: usize = 100;
+const MAX_PAGES: usize = 10;
 
 /// Format OpenAI range strings like "1m_5m", "under_1k", "over_10m", "none".
 pub fn format_openai_range(raw: Option<&str>) -> Option<String> {
@@ -29,7 +30,6 @@ pub fn format_openai_range(raw: Option<&str>) -> Option<String> {
         out = format!("> {rest}");
     }
     out = out.replace("_to_", "–");
-    // Handle patterns like "1m_5m" or "100k_500k"
     let parts: Vec<&str> = out.split('_').collect();
     if parts.len() == 2
         && parts
@@ -40,8 +40,6 @@ pub fn format_openai_range(raw: Option<&str>) -> Option<String> {
     } else {
         out = out.replace('_', " ");
     }
-    // Uppercase trailing k/m unit suffixes after digits
-    let bytes = out.as_bytes();
     let mut formatted = String::with_capacity(out.len());
     let chars: Vec<char> = out.chars().collect();
     for (i, &c) in chars.iter().enumerate() {
@@ -53,7 +51,6 @@ pub fn format_openai_range(raw: Option<&str>) -> Option<String> {
             formatted.push(c);
         }
     }
-    let _ = bytes;
     Some(formatted)
 }
 
@@ -133,31 +130,94 @@ async fn fetch_operations(
 
 pub async fn collect(client: &Client, cfg: &OpenAiConfig, concurrency: usize) -> PlatformReport {
     let start = Instant::now();
-    let list_path = format!("/custom_audiences?limit={LIMIT}");
-    let res = match api_get(client, cfg, &list_path).await {
-        Ok(v) => v,
-        Err(e) => {
-            return PlatformReport::failed(
-                PlatformId::OpenAi,
-                &cfg.base_url,
-                start.elapsed().as_millis() as u64,
-                e.to_string(),
-            );
+    if !cfg.options.enable_audiences {
+        return PlatformReport {
+            platform: PlatformId::OpenAi,
+            display_name: PlatformId::OpenAi.display_name().to_string(),
+            status: PlatformConnectionStatus::Ok,
+            base_url: cfg.base_url.clone(),
+            account_id: None,
+            account_name: Some("OpenAI Ads".to_string()),
+            duration_ms: 0,
+            metrics: None,
+            audiences: Vec::new(),
+            audiences_has_more: false,
+            audiences_total_before_filter: None,
+            campaigns: Vec::new(),
+            warnings: vec!["Audiences disabled via environment configuration.".to_string()],
+            error: None,
+            policy_revision: None,
+        };
+    }
+
+    let mut raw_audiences = Vec::new();
+    let mut audiences_has_more = false;
+    let mut policy_revision = None;
+    let mut after: Option<String> = None;
+
+    for _ in 0..MAX_PAGES {
+        let list_path = match &after {
+            Some(cursor) => format!(
+                "/custom_audiences?limit={LIMIT}&after={}",
+                urlencoding::encode(cursor)
+            ),
+            None => format!("/custom_audiences?limit={LIMIT}"),
+        };
+        let res = match api_get(client, cfg, &list_path).await {
+            Ok(v) => v,
+            Err(e) => {
+                if raw_audiences.is_empty() {
+                    return PlatformReport::failed(
+                        PlatformId::OpenAi,
+                        &cfg.base_url,
+                        start.elapsed().as_millis() as u64,
+                        e.to_string(),
+                    );
+                }
+                audiences_has_more = true;
+                break;
+            }
+        };
+
+        if policy_revision.is_none() {
+            policy_revision = json_str(&res, "policy_revision");
         }
-    };
+        let page_items = res
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let has_more = res
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let next_cursor = res
+            .get("last_id")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .or_else(|| page_items.last().and_then(|a| json_str(a, "id")));
 
-    let raw_audiences = res
-        .get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let audiences_has_more = res
-        .get("has_more")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let policy_revision = json_str(&res, "policy_revision");
+        raw_audiences.extend(page_items);
+        if !has_more || next_cursor.is_none() {
+            audiences_has_more = false;
+            break;
+        }
+        audiences_has_more = true;
+        after = next_cursor;
+    }
 
-    let ids: Vec<(usize, String)> = raw_audiences
+    let total_before_filter = raw_audiences.len();
+    let filtered_raw: Vec<Value> = raw_audiences
+        .into_iter()
+        .filter(|aud| {
+            let name = json_str(aud, "name").unwrap_or_default();
+            let desc = json_str(aud, "description");
+            cfg.options.matches_audience(&name, desc.as_deref())
+        })
+        .collect();
+
+    // Only fetch operations for audiences that passed the name filter!
+    let ids: Vec<(usize, String)> = filtered_raw
         .iter()
         .enumerate()
         .map(|(idx, aud)| (idx, json_str(aud, "id").unwrap_or_default()))
@@ -172,7 +232,7 @@ pub async fn collect(client: &Client, cfg: &OpenAiConfig, concurrency: usize) ->
         .collect()
         .await;
 
-    let mut ops_by_idx = vec![(Vec::new(), false, None); raw_audiences.len()];
+    let mut ops_by_idx = vec![(Vec::new(), false, None); filtered_raw.len()];
     for (idx, ops, has_more, err) in op_results {
         ops_by_idx[idx] = (ops, has_more, err);
     }
@@ -180,15 +240,16 @@ pub async fn collect(client: &Client, cfg: &OpenAiConfig, concurrency: usize) ->
     let mut warnings = Vec::new();
     if audiences_has_more {
         warnings.push(format!(
-            "More than {LIMIT} OpenAI audiences exist. Only the first page is shown."
+            "More than {} OpenAI audiences exist. Showing first {MAX_PAGES} pages.",
+            LIMIT * MAX_PAGES
         ));
     }
 
-    let mut audiences = Vec::with_capacity(raw_audiences.len());
+    let mut audiences = Vec::with_capacity(filtered_raw.len());
     let mut op_more_count = 0usize;
     let mut op_err_count = 0usize;
 
-    for (aud, (ops, ops_has_more, ops_err)) in raw_audiences.into_iter().zip(ops_by_idx) {
+    for (aud, (ops, ops_has_more, ops_err)) in filtered_raw.into_iter().zip(ops_by_idx) {
         if ops_has_more {
             op_more_count += 1;
         }
@@ -264,6 +325,11 @@ pub async fn collect(client: &Client, cfg: &OpenAiConfig, concurrency: usize) ->
         metrics: None,
         audiences,
         audiences_has_more,
+        audiences_total_before_filter: if cfg.options.has_audience_filter() {
+            Some(total_before_filter)
+        } else {
+            None
+        },
         campaigns: Vec::new(),
         warnings,
         error: None,

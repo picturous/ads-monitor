@@ -55,7 +55,7 @@ pub async fn collect_all(client: &Client, cfg: &AppConfig, served: bool) -> Moni
                     None => PlatformReport::unconfigured(
                         PlatformId::LineOa,
                         "https://api.line.me",
-                        "Set LINE_OA_CHANNEL_ACCESS_TOKEN to enable LINE Official Account monitoring.",
+                        "Set LINE_OA_CHANNEL_ID + LINE_OA_CHANNEL_SECRET (stateless) or LINE_OA_CHANNEL_ACCESS_TOKEN to enable LINE OA monitoring.",
                     ),
                 },
                 PlatformId::LineAds => match &cfg.line_ads {
@@ -78,6 +78,9 @@ pub async fn collect_all(client: &Client, cfg: &AppConfig, served: bool) -> Moni
         lookback_days: cfg.lookback_days,
         served,
         demo_mode: false,
+        audiences_enabled: cfg.enable_audiences,
+        campaigns_enabled: cfg.enable_campaigns,
+        audience_filter: cfg.audience_filter.clone(),
         summary,
         platforms,
     }
@@ -145,6 +148,7 @@ pub fn demo_snapshot(lookback_days: u32, served: bool) -> MonitorSnapshot {
                 )]),
             }],
             audiences_has_more: false,
+            audiences_total_before_filter: None,
             campaigns: Vec::new(),
             warnings: Vec::new(),
             error: None,
@@ -235,6 +239,7 @@ pub fn demo_snapshot(lookback_days: u32, served: bool) -> MonitorSnapshot {
                 },
             ],
             audiences_has_more: false,
+            audiences_total_before_filter: None,
             campaigns: vec![
                 CampaignRecord {
                     platform: PlatformId::Facebook,
@@ -327,6 +332,7 @@ pub fn demo_snapshot(lookback_days: u32, served: bool) -> MonitorSnapshot {
                 extra: BTreeMap::from([("eligibleForSearch".to_string(), json!(true))]),
             }],
             audiences_has_more: false,
+            audiences_total_before_filter: None,
             campaigns: vec![CampaignRecord {
                 platform: PlatformId::Google,
                 id: "2049182736".to_string(),
@@ -402,6 +408,7 @@ pub fn demo_snapshot(lookback_days: u32, served: bool) -> MonitorSnapshot {
                 extra: BTreeMap::new(),
             }],
             audiences_has_more: false,
+            audiences_total_before_filter: None,
             campaigns: vec![CampaignRecord {
                 platform: PlatformId::Tiktok,
                 id: "178900112233".to_string(),
@@ -486,6 +493,7 @@ pub fn demo_snapshot(lookback_days: u32, served: bool) -> MonitorSnapshot {
                 extra: BTreeMap::new(),
             }],
             audiences_has_more: false,
+            audiences_total_before_filter: None,
             campaigns: Vec::new(),
             warnings: Vec::new(),
             error: None,
@@ -534,6 +542,7 @@ pub fn demo_snapshot(lookback_days: u32, served: bool) -> MonitorSnapshot {
                 extra: BTreeMap::new(),
             }],
             audiences_has_more: false,
+            audiences_total_before_filter: None,
             campaigns: vec![CampaignRecord {
                 platform: PlatformId::LineAds,
                 id: "lcmp_441122".to_string(),
@@ -562,6 +571,9 @@ pub fn demo_snapshot(lookback_days: u32, served: bool) -> MonitorSnapshot {
         lookback_days,
         served,
         demo_mode: true,
+        audiences_enabled: true,
+        campaigns_enabled: true,
+        audience_filter: Vec::new(),
         summary,
         platforms,
     }

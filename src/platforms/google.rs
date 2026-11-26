@@ -116,6 +116,28 @@ pub async fn collect(client: &Client, cfg: &GoogleAdsConfig, lookback_days: u32)
     let start = Instant::now();
     let endpoint_base = format!("{}/{}", cfg.base_url, cfg.api_version);
 
+    if !cfg.options.enable_audiences && !cfg.options.enable_campaigns {
+        return PlatformReport {
+            platform: PlatformId::Google,
+            display_name: PlatformId::Google.display_name().to_string(),
+            status: PlatformConnectionStatus::Ok,
+            base_url: endpoint_base,
+            account_id: Some(cfg.customer_id.clone()),
+            account_name: None,
+            duration_ms: 0,
+            metrics: None,
+            audiences: Vec::new(),
+            audiences_has_more: false,
+            audiences_total_before_filter: None,
+            campaigns: Vec::new(),
+            warnings: vec![
+                "Both audiences and campaigns disabled via environment configuration.".to_string(),
+            ],
+            error: None,
+            policy_revision: None,
+        };
+    }
+
     let access_token = match resolve_access_token(client, cfg).await {
         Ok(tok) => tok,
         Err(e) => {
@@ -154,16 +176,43 @@ pub async fn collect(client: &Client, cfg: &GoogleAdsConfig, lookback_days: u32)
          FROM offline_user_data_job";
 
     let (cust_res, camp_res, ul_res, jobs_res) = tokio::join!(
-        search_stream(client, cfg, &access_token, &customer_q),
-        search_stream(client, cfg, &access_token, &campaign_q),
-        search_stream(client, cfg, &access_token, user_list_q),
-        search_stream(client, cfg, &access_token, jobs_q),
+        async {
+            if cfg.options.enable_campaigns {
+                Some(search_stream(client, cfg, &access_token, &customer_q).await)
+            } else {
+                None
+            }
+        },
+        async {
+            if cfg.options.enable_campaigns {
+                Some(search_stream(client, cfg, &access_token, &campaign_q).await)
+            } else {
+                None
+            }
+        },
+        async {
+            if cfg.options.enable_audiences {
+                Some(search_stream(client, cfg, &access_token, user_list_q).await)
+            } else {
+                None
+            }
+        },
+        async {
+            if cfg.options.enable_audiences {
+                Some(search_stream(client, cfg, &access_token, jobs_q).await)
+            } else {
+                None
+            }
+        },
     );
 
-    if cust_res.is_err() && camp_res.is_err() && ul_res.is_err() {
+    let attempted_results = [&cust_res, &camp_res, &ul_res];
+    let any_ok = attempted_results.iter().any(|r| matches!(r, Some(Ok(_))));
+    if !any_ok {
         let msg = ul_res
-            .err()
-            .or_else(|| cust_res.err())
+            .and_then(Result::err)
+            .or_else(|| cust_res.and_then(Result::err))
+            .or_else(|| camp_res.and_then(Result::err))
             .map(|e| e.to_string())
             .unwrap_or_else(|| "Google Ads query failed".to_string());
         return PlatformReport::failed(
@@ -184,238 +233,257 @@ pub async fn collect(client: &Client, cfg: &GoogleAdsConfig, lookback_days: u32)
     let mut total_clicks = 0_u64;
     let mut total_conversions = 0.0_f64;
 
-    match cust_res {
-        Ok(rows) => {
-            for row in rows {
-                if let Some(c) = row.get("customer") {
-                    if account_name.is_none() {
-                        account_name = json_str(c, "descriptiveName");
+    if let Some(res) = cust_res {
+        match res {
+            Ok(rows) => {
+                for row in rows {
+                    if let Some(c) = row.get("customer") {
+                        if account_name.is_none() {
+                            account_name = json_str(c, "descriptiveName");
+                        }
+                        if currency.is_none() {
+                            currency = json_str(c, "currencyCode");
+                        }
+                        if account_status.is_none() {
+                            account_status = json_str(c, "status");
+                        }
                     }
-                    if currency.is_none() {
-                        currency = json_str(c, "currencyCode");
+                    if let Some(m) = row.get("metrics") {
+                        if let Some(micros) = json_f64(m, "costMicros") {
+                            total_spend += micros / 1_000_000.0;
+                            has_spend = true;
+                        }
+                        total_impressions += json_u64(m, "impressions").unwrap_or(0);
+                        total_clicks += json_u64(m, "clicks").unwrap_or(0);
+                        total_conversions += json_f64(m, "conversions").unwrap_or(0.0);
                     }
-                    if account_status.is_none() {
-                        account_status = json_str(c, "status");
-                    }
-                }
-                if let Some(m) = row.get("metrics") {
-                    if let Some(micros) = json_f64(m, "costMicros") {
-                        total_spend += micros / 1_000_000.0;
-                        has_spend = true;
-                    }
-                    total_impressions += json_u64(m, "impressions").unwrap_or(0);
-                    total_clicks += json_u64(m, "clicks").unwrap_or(0);
-                    total_conversions += json_f64(m, "conversions").unwrap_or(0.0);
                 }
             }
+            Err(e) => warnings.push(format!("Customer spend query failed: {e}")),
         }
-        Err(e) => warnings.push(format!("Customer spend query failed: {e}")),
     }
 
     let mut campaigns = Vec::new();
-    match camp_res {
-        Ok(rows) => {
-            for row in rows {
-                let c = match row.get("campaign") {
-                    Some(v) => v,
-                    None => continue,
-                };
-                let m = row.get("metrics");
-                let id = json_str(c, "id").unwrap_or_default();
-                let status = json_str(c, "status").unwrap_or_else(|| "UNKNOWN".to_string());
-                let spend = m
-                    .and_then(|v| json_f64(v, "costMicros"))
-                    .map(|mi| mi / 1_000_000.0);
-                let impressions = m.and_then(|v| json_u64(v, "impressions"));
-                let clicks = m.and_then(|v| json_u64(v, "clicks"));
-                let conversions = m.and_then(|v| json_f64(v, "conversions"));
-                let ctr = match (impressions, clicks) {
-                    (Some(i), Some(cl)) if i > 0 => Some((cl as f64 / i as f64) * 100.0),
-                    _ => None,
-                };
-                let cpc = match (spend, clicks) {
-                    (Some(sp), Some(cl)) if cl > 0 => Some(sp / cl as f64),
-                    _ => None,
-                };
-                campaigns.push(CampaignRecord {
-                    platform: PlatformId::Google,
-                    id: id.clone(),
-                    name: json_str(c, "name").unwrap_or(id),
-                    normalized_status: NormalizedStatus::from_raw(&status),
-                    status,
-                    objective: json_str(c, "advertisingChannelType"),
-                    spend,
-                    currency: currency.clone(),
-                    impressions,
-                    clicks,
-                    conversions,
-                    ctr,
-                    cpc,
-                    extra: c
-                        .as_object()
-                        .map(|o| extra_from_object(o, &["id", "name", "status"]))
-                        .unwrap_or_default(),
-                });
+    if let Some(res) = camp_res {
+        match res {
+            Ok(rows) => {
+                for row in rows {
+                    let c = match row.get("campaign") {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let m = row.get("metrics");
+                    let id = json_str(c, "id").unwrap_or_default();
+                    let status = json_str(c, "status").unwrap_or_else(|| "UNKNOWN".to_string());
+                    let spend = m
+                        .and_then(|v| json_f64(v, "costMicros"))
+                        .map(|mi| mi / 1_000_000.0);
+                    let impressions = m.and_then(|v| json_u64(v, "impressions"));
+                    let clicks = m.and_then(|v| json_u64(v, "clicks"));
+                    let conversions = m.and_then(|v| json_f64(v, "conversions"));
+                    let ctr = match (impressions, clicks) {
+                        (Some(i), Some(cl)) if i > 0 => Some((cl as f64 / i as f64) * 100.0),
+                        _ => None,
+                    };
+                    let cpc = match (spend, clicks) {
+                        (Some(sp), Some(cl)) if cl > 0 => Some(sp / cl as f64),
+                        _ => None,
+                    };
+                    campaigns.push(CampaignRecord {
+                        platform: PlatformId::Google,
+                        id: id.clone(),
+                        name: json_str(c, "name").unwrap_or(id),
+                        normalized_status: NormalizedStatus::from_raw(&status),
+                        status,
+                        objective: json_str(c, "advertisingChannelType"),
+                        spend,
+                        currency: currency.clone(),
+                        impressions,
+                        clicks,
+                        conversions,
+                        ctr,
+                        cpc,
+                        extra: c
+                            .as_object()
+                            .map(|o| extra_from_object(o, &["id", "name", "status"]))
+                            .unwrap_or_default(),
+                    });
+                }
             }
+            Err(e) => warnings.push(format!("Campaign query failed: {e}")),
         }
-        Err(e) => warnings.push(format!("Campaign query failed: {e}")),
     }
 
-    // Group offline_user_data_job by target user_list resource name
     let mut jobs_by_user_list: HashMap<String, Vec<OperationRecord>> = HashMap::new();
-    match jobs_res {
-        Ok(rows) => {
-            for row in rows {
-                let j = match row.get("offlineUserDataJob") {
-                    Some(v) => v,
-                    None => continue,
-                };
-                let ul_res_name = j
-                    .pointer("/customerMatchUserListMetadata/userList")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let status = json_str(j, "status").unwrap_or_else(|| "UNKNOWN".to_string());
-                let op = OperationRecord {
-                    id: json_str(j, "id")
-                        .or_else(|| json_str(j, "resourceName"))
-                        .unwrap_or_default(),
-                    operation: json_str(j, "type")
-                        .unwrap_or_else(|| "CUSTOMER_MATCH_USER_LIST".to_string()),
-                    normalized_status: NormalizedStatus::from_raw(&status),
-                    status,
-                    created_at: None,
-                    updated_at: None,
-                    count: None,
-                    error: json_str(j, "failureReason"),
-                    extra: j
-                        .as_object()
-                        .map(|o| extra_from_object(o, &["id", "type", "status"]))
-                        .unwrap_or_default(),
-                };
-                jobs_by_user_list.entry(ul_res_name).or_default().push(op);
+    if let Some(res) = jobs_res {
+        match res {
+            Ok(rows) => {
+                for row in rows {
+                    let j = match row.get("offlineUserDataJob") {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let ul_res_name = j
+                        .pointer("/customerMatchUserListMetadata/userList")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let status = json_str(j, "status").unwrap_or_else(|| "UNKNOWN".to_string());
+                    let op = OperationRecord {
+                        id: json_str(j, "id")
+                            .or_else(|| json_str(j, "resourceName"))
+                            .unwrap_or_default(),
+                        operation: json_str(j, "type")
+                            .unwrap_or_else(|| "CUSTOMER_MATCH_USER_LIST".to_string()),
+                        normalized_status: NormalizedStatus::from_raw(&status),
+                        status,
+                        created_at: None,
+                        updated_at: None,
+                        count: None,
+                        error: json_str(j, "failureReason"),
+                        extra: j
+                            .as_object()
+                            .map(|o| extra_from_object(o, &["id", "type", "status"]))
+                            .unwrap_or_default(),
+                    };
+                    jobs_by_user_list.entry(ul_res_name).or_default().push(op);
+                }
             }
+            Err(e) => warnings.push(format!("Offline user data jobs query failed: {e}")),
         }
-        Err(e) => warnings.push(format!("Offline user data jobs query failed: {e}")),
     }
 
     let mut audiences = Vec::new();
-    match ul_res {
-        Ok(rows) => {
-            for row in rows {
-                let ul = match row.get("userList") {
-                    Some(v) => v,
-                    None => continue,
-                };
-                let id = json_str(ul, "id").unwrap_or_default();
-                let res_name = json_str(ul, "resourceName")
-                    .unwrap_or_else(|| format!("customers/{}/userLists/{id}", cfg.customer_id));
-                let membership =
-                    json_str(ul, "membershipStatus").unwrap_or_else(|| "UNKNOWN".to_string());
-                let eligible_search = ul
-                    .get("eligibleForSearch")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let eligible_display = ul
-                    .get("eligibleForDisplay")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-
-                let (status, normalized_status) = if membership.eq_ignore_ascii_case("OPEN") {
-                    if eligible_search || eligible_display {
-                        ("ready".to_string(), NormalizedStatus::Ready)
-                    } else {
-                        ("open_not_eligible".to_string(), NormalizedStatus::Warning)
+    let mut total_before_filter = 0usize;
+    if let Some(res) = ul_res {
+        match res {
+            Ok(rows) => {
+                for row in rows {
+                    let ul = match row.get("userList") {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    total_before_filter += 1;
+                    let id = json_str(ul, "id").unwrap_or_default();
+                    let name = json_str(ul, "name").unwrap_or_else(|| id.clone());
+                    let description = json_str(ul, "description");
+                    if !cfg.options.matches_audience(&name, description.as_deref()) {
+                        continue;
                     }
-                } else {
-                    (membership.clone(), NormalizedStatus::from_raw(&membership))
-                };
 
-                let size_search = json_i64(ul, "sizeForSearch");
-                let size_display = json_i64(ul, "sizeForDisplay");
-                let matched_users = match (size_search, size_display) {
-                    (Some(s), Some(d)) if s > 0 || d > 0 => Some(format!(
-                        "Search: {} / Display: {}",
-                        format_compact_count(s),
-                        format_compact_count(d)
-                    )),
-                    (Some(s), _) if s > 0 => Some(format_compact_count(s)),
-                    (_, Some(d)) if d > 0 => Some(format_compact_count(d)),
-                    _ => format_google_size_range(
-                        ul.get("sizeRangeForSearch").and_then(Value::as_str),
-                    )
-                    .or_else(|| {
-                        format_google_size_range(
-                            ul.get("sizeRangeForDisplay").and_then(Value::as_str),
+                    let res_name = json_str(ul, "resourceName")
+                        .unwrap_or_else(|| format!("customers/{}/userLists/{id}", cfg.customer_id));
+                    let membership =
+                        json_str(ul, "membershipStatus").unwrap_or_else(|| "UNKNOWN".to_string());
+                    let eligible_search = ul
+                        .get("eligibleForSearch")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let eligible_display = ul
+                        .get("eligibleForDisplay")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+
+                    let (status, normalized_status) = if membership.eq_ignore_ascii_case("OPEN") {
+                        if eligible_search || eligible_display {
+                            ("ready".to_string(), NormalizedStatus::Ready)
+                        } else {
+                            ("open_not_eligible".to_string(), NormalizedStatus::Warning)
+                        }
+                    } else {
+                        (membership.clone(), NormalizedStatus::from_raw(&membership))
+                    };
+
+                    let size_search = json_i64(ul, "sizeForSearch");
+                    let size_display = json_i64(ul, "sizeForDisplay");
+                    let matched_users = match (size_search, size_display) {
+                        (Some(s), Some(d)) if s > 0 || d > 0 => Some(format!(
+                            "Search: {} / Display: {}",
+                            format_compact_count(s),
+                            format_compact_count(d)
+                        )),
+                        (Some(s), _) if s > 0 => Some(format_compact_count(s)),
+                        (_, Some(d)) if d > 0 => Some(format_compact_count(d)),
+                        _ => format_google_size_range(
+                            ul.get("sizeRangeForSearch").and_then(Value::as_str),
                         )
-                    }),
-                };
+                        .or_else(|| {
+                            format_google_size_range(
+                                ul.get("sizeRangeForDisplay").and_then(Value::as_str),
+                            )
+                        }),
+                    };
 
-                let ops = jobs_by_user_list.remove(&res_name).unwrap_or_default();
+                    let ops = jobs_by_user_list.remove(&res_name).unwrap_or_default();
 
-                audiences.push(AudienceRecord {
-                    platform: PlatformId::Google,
-                    id: id.clone(),
-                    name: json_str(ul, "name").unwrap_or(id),
-                    description: json_str(ul, "description"),
-                    audience_type: json_str(ul, "type"),
-                    status,
-                    normalized_status,
-                    matched_users,
-                    matched_ids: None,
-                    uploaded_ids: None,
-                    invalid_ids: None,
-                    match_rate_pct: json_f64(ul, "matchRatePercentage"),
-                    revision: None,
-                    created_at: None,
-                    updated_at: None,
-                    operations: ops,
-                    operations_has_more: false,
-                    operations_error: None,
-                    extra: ul
-                        .as_object()
-                        .map(|o| extra_from_object(o, &[]))
-                        .unwrap_or_default(),
-                });
+                    audiences.push(AudienceRecord {
+                        platform: PlatformId::Google,
+                        id,
+                        name,
+                        description,
+                        audience_type: json_str(ul, "type"),
+                        status,
+                        normalized_status,
+                        matched_users,
+                        matched_ids: None,
+                        uploaded_ids: None,
+                        invalid_ids: None,
+                        match_rate_pct: json_f64(ul, "matchRatePercentage"),
+                        revision: None,
+                        created_at: None,
+                        updated_at: None,
+                        operations: ops,
+                        operations_has_more: false,
+                        operations_error: None,
+                        extra: ul
+                            .as_object()
+                            .map(|o| extra_from_object(o, &[]))
+                            .unwrap_or_default(),
+                    });
+                }
             }
+            Err(e) => warnings.push(format!("User lists query failed: {e}")),
         }
-        Err(e) => warnings.push(format!("User lists query failed: {e}")),
     }
 
-    let active_campaigns = campaigns
-        .iter()
-        .filter(|c| c.normalized_status == NormalizedStatus::Ready)
-        .count();
+    let metrics = if cfg.options.enable_campaigns {
+        let active_campaigns = campaigns
+            .iter()
+            .filter(|c| c.normalized_status == NormalizedStatus::Ready)
+            .count();
 
-    let ctr = if total_impressions > 0 {
-        Some((total_clicks as f64 / total_impressions as f64) * 100.0)
-    } else {
-        None
-    };
-    let cpc = if has_spend && total_clicks > 0 {
-        Some(total_spend / total_clicks as f64)
-    } else {
-        None
-    };
-
-    let metrics = Some(AccountMetrics {
-        spend: if has_spend { Some(total_spend) } else { None },
-        currency,
-        impressions: Some(total_impressions),
-        clicks: Some(total_clicks),
-        conversions: if total_conversions > 0.0 {
-            Some(total_conversions)
+        let ctr = if total_impressions > 0 {
+            Some((total_clicks as f64 / total_impressions as f64) * 100.0)
         } else {
             None
-        },
-        ctr,
-        cpc,
-        active_campaigns: Some(active_campaigns),
-        total_campaigns: Some(campaigns.len()),
-        account_status,
-        date_range: Some(format!("{since}..{until}")),
-        ..Default::default()
-    });
+        };
+        let cpc = if has_spend && total_clicks > 0 {
+            Some(total_spend / total_clicks as f64)
+        } else {
+            None
+        };
+
+        Some(AccountMetrics {
+            spend: if has_spend { Some(total_spend) } else { None },
+            currency,
+            impressions: Some(total_impressions),
+            clicks: Some(total_clicks),
+            conversions: if total_conversions > 0.0 {
+                Some(total_conversions)
+            } else {
+                None
+            },
+            ctr,
+            cpc,
+            active_campaigns: Some(active_campaigns),
+            total_campaigns: Some(campaigns.len()),
+            account_status,
+            date_range: Some(format!("{since}..{until}")),
+            ..Default::default()
+        })
+    } else {
+        None
+    };
 
     let status = if warnings.is_empty() {
         PlatformConnectionStatus::Ok
@@ -434,6 +502,13 @@ pub async fn collect(client: &Client, cfg: &GoogleAdsConfig, lookback_days: u32)
         metrics,
         audiences,
         audiences_has_more: false,
+        audiences_total_before_filter: if cfg.options.enable_audiences
+            && cfg.options.has_audience_filter()
+        {
+            Some(total_before_filter)
+        } else {
+            None
+        },
         campaigns,
         warnings,
         error: None,
