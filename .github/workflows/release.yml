@@ -105,6 +105,43 @@ jobs:
           head -n 20 smoke.json
           rm -f smoke.json
 
+  deploy:
+    name: Deploy to Portainer (GitOps)
+    needs: docker
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["self-hosted","linux","x64","proxmox","nk"]') }}
+    steps:
+      - name: Checkout deploy repo
+        uses: actions/checkout@v4
+        with:
+          repository: bossoq/homelab-portainer-deploy
+          token: ${{ secrets.DEPLOY_REPO_TOKEN }}
+
+      - name: Bump pinned image tag and push
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="sha-${GITHUB_SHA::7}"
+          fi
+          sed -i -E "s#(ghcr\.io/picturous/ads-monitor):[^\"[:space:]]+#\1:${TAG}#g" ads-monitor/docker-compose.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "No tag change"
+          else
+            git commit -am "ads-monitor: deploy ${TAG}"
+            git push
+          fi
+
+      - name: Trigger Portainer redeploy (via Cloudflare Access)
+        run: |
+          sleep 5
+          curl -fsS -X POST \
+            -H "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
+            -H "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}" \
+            "https://portainer.picturo.us/api/stacks/webhooks/01126559-d032-4b77-bd14-06693d8001ab"
+
   github-release:
     name: Publish GitHub Release
     needs: docker
