@@ -19,49 +19,33 @@ env:
 
 jobs:
   ci:
-    name: Format, Clippy, Test & Release Build (Self-Hosted)
-    runs-on: self-hosted
+    name: Format, Clippy, Test & Release Build (Proxmox Docker)
+    runs-on: [self-hosted, Linux, X64, proxmox]
+    container:
+      image: rust:1-bookworm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure Rust toolchain components
-        shell: bash
+      - name: Ensure rustfmt & clippy
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          if command -v rustup >/dev/null 2>&1; then
-            rustup component add rustfmt clippy
-          fi
+          rustup component add rustfmt clippy
           rustc --version
           cargo --version
 
       - name: Check formatting
-        shell: bash
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        shell: bash
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run tests
-        shell: bash
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo test --locked -- --nocapture
+        run: cargo test --locked -- --nocapture
 
       - name: Build release binary
-        shell: bash
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo build --release --locked
+        run: cargo build --release --locked
 
       - name: Smoke test demo mode
-        shell: bash
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
           cargo run --release --locked -- --demo --no-open --out smoke-dashboard.html
           rm -f smoke-dashboard.html
