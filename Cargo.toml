@@ -1,0 +1,28 @@
+[package]
+name = "ads-monitor"
+version = "0.1.0"
+edition = "2021"
+description = "Unified multi-platform Ads & Custom Audience Monitoring dashboard (OpenAI Ads, Meta/Facebook Ads, Google Ads, TikTok Ads, LINE OA, LINE Ads)"
+
+[dependencies]
+axum = "0.8"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+dotenvy = "0.15"
+futures = "0.3"
+hmac = "0.12"
+open = "5.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1.43", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+urlencoding = "2.1"
+
+[dev-dependencies]
+wiremock = "0.6"
+tower = { version = "0.5", features = ["util"] }
