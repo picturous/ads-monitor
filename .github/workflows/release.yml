@@ -137,7 +137,9 @@ jobs:
       - name: Trigger Portainer redeploy (via Cloudflare Access)
         run: |
           sleep 5
-          curl -fsS -X POST \
+          # Use DoH (1.1.1.1) so NK runner bypasses local split-horizon DNS (10.0.1.1 -> NK Portainer)
+          # and reaches QP Portainer via Cloudflare Access.
+          curl --doh-url https://1.1.1.1/dns-query -fsS -X POST \
             -H "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
             -H "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}" \
             "https://portainer.picturo.us/api/stacks/webhooks/01126559-d032-4b77-bd14-06693d8001ab"
