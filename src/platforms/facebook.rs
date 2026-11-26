@@ -192,10 +192,46 @@ async fn fetch_sessions(
                 .map(|arr| {
                     arr.iter()
                         .map(|s| {
-                            let progress = json_str(s, "progress")
-                                .or_else(|| json_str(s, "stage"))
-                                .unwrap_or_else(|| "completed".to_string());
-                            let normalized_status = NormalizedStatus::from_raw(&progress);
+                            let stage = json_str(s, "stage")
+                                .unwrap_or_else(|| "upload_session".to_string());
+                            let progress = json_str(s, "progress");
+                            let end_time = parse_timestamp(s.get("end_time"));
+                            let (status, normalized_status) = match (
+                                stage.to_ascii_lowercase().as_str(),
+                                progress.as_deref(),
+                                end_time,
+                            ) {
+                                (st, _, _) if st.contains("fail") || st.contains("error") => {
+                                    (stage.clone(), NormalizedStatus::Failed)
+                                }
+                                (
+                                    "completed" | "finished" | "done" | "succeeded" | "success",
+                                    _,
+                                    _,
+                                ) => (stage.clone(), NormalizedStatus::Ready),
+                                (_, Some("100"), _) => {
+                                    ("completed".to_string(), NormalizedStatus::Ready)
+                                }
+                                (_, Some(p), _) if p.eq_ignore_ascii_case("completed") => {
+                                    ("completed".to_string(), NormalizedStatus::Ready)
+                                }
+                                (
+                                    "uploading" | "processing" | "pending" | "queued" | "running",
+                                    _,
+                                    _,
+                                ) => (stage.clone(), NormalizedStatus::Processing),
+                                (_, _, Some(_)) => {
+                                    ("completed".to_string(), NormalizedStatus::Ready)
+                                }
+                                (_, Some(p), None) if p.chars().all(|c| c.is_ascii_digit()) => {
+                                    (format!("{stage} ({p}%)"), NormalizedStatus::Processing)
+                                }
+                                _ => {
+                                    let raw = progress.unwrap_or_else(|| stage.clone());
+                                    let norm = NormalizedStatus::from_raw(&raw);
+                                    (raw, norm)
+                                }
+                            };
                             let extra = s
                                 .as_object()
                                 .map(|m| extra_from_object(m, &["session_id"]))
@@ -204,12 +240,11 @@ async fn fetch_sessions(
                                 id: json_str(s, "session_id")
                                     .or_else(|| json_str(s, "id"))
                                     .unwrap_or_default(),
-                                operation: json_str(s, "stage")
-                                    .unwrap_or_else(|| "upload_session".to_string()),
-                                status: progress,
+                                operation: stage,
+                                status,
                                 normalized_status,
                                 created_at: parse_timestamp(s.get("start_time")),
-                                updated_at: parse_timestamp(s.get("end_time")),
+                                updated_at: end_time,
                                 count: json_u64(s, "num_received"),
                                 error: json_u64(s, "num_invalid_entries").and_then(|inv| {
                                     if inv > 0 {

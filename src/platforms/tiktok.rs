@@ -40,18 +40,35 @@ async fn tiktok_get(
     Ok(val.get("data").cloned().unwrap_or(Value::Null))
 }
 
-fn normalize_tiktok_audience_status(raw: Option<&Value>) -> (String, NormalizedStatus) {
-    match raw {
-        Some(Value::String(s)) => (s.clone(), NormalizedStatus::from_raw(s)),
-        Some(Value::Number(n)) => match n.as_i64() {
-            Some(1) => ("not_ready".to_string(), NormalizedStatus::Warning),
-            Some(2) => ("ready".to_string(), NormalizedStatus::Ready),
-            Some(3) => ("expired".to_string(), NormalizedStatus::Failed),
-            Some(4) => ("processing".to_string(), NormalizedStatus::Processing),
-            Some(other) => (format!("status_{other}"), NormalizedStatus::Neutral),
-            None => ("unknown".to_string(), NormalizedStatus::Neutral),
-        },
-        _ => ("unknown".to_string(), NormalizedStatus::Neutral),
+fn normalize_tiktok_audience_status(aud: &Value) -> (String, NormalizedStatus) {
+    match aud.get("status") {
+        Some(Value::String(s)) if !s.trim().is_empty() => {
+            return (s.clone(), NormalizedStatus::from_raw(s));
+        }
+        Some(Value::Number(n)) => {
+            return match n.as_i64() {
+                Some(1) => ("not_ready".to_string(), NormalizedStatus::Warning),
+                Some(2) => ("ready".to_string(), NormalizedStatus::Ready),
+                Some(3) => ("expired".to_string(), NormalizedStatus::Failed),
+                Some(4) => ("processing".to_string(), NormalizedStatus::Processing),
+                Some(other) => (format!("status_{other}"), NormalizedStatus::Neutral),
+                None => ("unknown".to_string(), NormalizedStatus::Neutral),
+            };
+        }
+        _ => {}
+    }
+
+    // TikTok /dmp/custom_audience/list/ returns `is_valid` / `is_expiring` booleans instead of `status`
+    let is_valid = aud.get("is_valid").and_then(Value::as_bool);
+    let is_expiring = aud
+        .get("is_expiring")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match is_valid {
+        Some(true) if is_expiring => ("expiring".to_string(), NormalizedStatus::Warning),
+        Some(true) => ("valid".to_string(), NormalizedStatus::Ready),
+        Some(false) => ("invalid".to_string(), NormalizedStatus::Warning),
+        None => ("unknown".to_string(), NormalizedStatus::Neutral),
     }
 }
 
@@ -473,8 +490,7 @@ pub async fn collect(client: &Client, cfg: &TikTokConfig, lookback_days: u32) ->
                     let id = json_str(&a, "custom_audience_id")
                         .or_else(|| json_str(&a, "audience_id"))
                         .unwrap_or_default();
-                    let (status, normalized_status) =
-                        normalize_tiktok_audience_status(a.get("status"));
+                    let (status, normalized_status) = normalize_tiktok_audience_status(&a);
                     let matched_users = json_i64(&a, "cover_num").map(format_compact_count);
                     let ops = history_by_id.remove(&id).unwrap_or_default();
 

@@ -205,13 +205,22 @@ async fn test_facebook_collects_account_insights_campaigns_audiences_and_session
     Mock::given(method("GET"))
         .and(path("/v25.0/aud_1/sessions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{
-                "session_id": "998877",
-                "stage": "upload",
-                "progress": "completed",
-                "num_received": 50000,
-                "num_invalid_entries": 12
-            }]
+            "data": [
+                {
+                    "session_id": "998877",
+                    "stage": "upload",
+                    "progress": "100",
+                    "num_received": 50000,
+                    "num_invalid_entries": 12
+                },
+                {
+                    "session_id": "998878",
+                    "stage": "uploading",
+                    "progress": "0",
+                    "end_time": "0",
+                    "num_received": 10000
+                }
+            ]
         })))
         .mount(&server)
         .await;
@@ -245,7 +254,16 @@ async fn test_facebook_collects_account_insights_campaigns_audiences_and_session
         report.audiences[0].matched_users.as_deref(),
         Some("12K–15K")
     );
-    assert_eq!(report.audiences[0].operations.len(), 1);
+    assert_eq!(report.audiences[0].operations.len(), 2);
+    assert_eq!(
+        report.audiences[0].operations[0].normalized_status,
+        NormalizedStatus::Ready
+    );
+    assert_eq!(
+        report.audiences[0].operations[1].normalized_status,
+        NormalizedStatus::Processing
+    );
+    assert_eq!(report.audiences[0].operations[1].updated_at, None);
     assert_eq!(
         report.audiences[1].normalized_status,
         NormalizedStatus::Failed
@@ -394,7 +412,8 @@ async fn test_tiktok_audience_only_mode_skips_campaigns_and_reports() {
                     "custom_audience_id": "tt_aud_1",
                     "name": "TIKTOK_CUSTOMERS",
                     "audience_type": "CUSTOMER_FILE",
-                    "status": 2,
+                    "is_valid": true,
+                    "is_expiring": false,
                     "cover_num": 85000,
                     "calculate_type": "MULTIPLE_TYPES",
                     "create_time": "2026-11-01 00:00:00"
@@ -457,6 +476,10 @@ async fn test_tiktok_audience_only_mode_skips_campaigns_and_reports() {
     assert!(report.metrics.is_none());
     assert!(report.campaigns.is_empty());
     assert_eq!(report.audiences.len(), 1);
+    assert_eq!(
+        report.audiences[0].normalized_status,
+        NormalizedStatus::Ready
+    );
     assert_eq!(report.audiences[0].matched_users.as_deref(), Some("85K"));
     assert_eq!(report.audiences[0].operations.len(), 1);
 }

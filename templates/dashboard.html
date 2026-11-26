@@ -201,7 +201,18 @@ const fmtPct = v => v == null ? '—' : `${Number(v).toFixed(2)}%`;
 const label = s => s == null || s === '' ? '—' : String(s).replace(/_/g, ' ');
 const normTone = n => ({ready:'ok', processing:'pr', failed:'bad', warning:'pr', neutral:'nt'}[n] || 'nt');
 const connTone = s => ({ok:'ok', partial:'pr', error:'bad', unconfigured:'nt'}[s] || 'nt');
-const pill = (text, norm) => `<span class="pill ${normTone(norm)}">${esc(label(text))}</span>`;
+const AUD_STATUS_LABELS = {ready:'Ready', processing:'Processing', warning:'Warning', failed:'Failed', neutral:'Unknown'};
+const OP_STATUS_LABELS = {ready:'Succeeded', processing:'Processing', warning:'Warning', failed:'Failed', neutral:'Unknown'};
+const CAMP_STATUS_LABELS = {ready:'Active', processing:'Pending', warning:'Paused', failed:'Stopped', neutral:'Unknown'};
+const unifiedStatusLabel = (norm, kind) => {
+  const map = kind === 'op' ? OP_STATUS_LABELS : kind === 'camp' ? CAMP_STATUS_LABELS : AUD_STATUS_LABELS;
+  return map[norm] || 'Unknown';
+};
+const pill = (raw, norm, kind = 'aud') => {
+  const text = unifiedStatusLabel(norm, kind);
+  const tip = raw ? ` title="Raw: ${esc(raw)}"` : '';
+  return `<span class="pill ${normTone(norm)}"${tip}>${esc(text)}</span>`;
+};
 const pbadge = p => `<span class="pbadge"><span class="pdot" style="background:${PLATFORM_COLORS[p] || '#888'}"></span>${esc(PLATFORM_LABELS[p] || p)}</span>`;
 const copyBtn = v => `<button class="copy" data-copy="${esc(v)}" title="Copy">copy</button>`;
 
@@ -361,36 +372,36 @@ function rebuildFilters() {
   fill('cfPlat', plats);
 
   const auds = allAudiences();
-  const audStatuses = [...new Set(auds.map(a => a.normalized_status))].sort().map(s => [s, label(s)]);
+  const audStatuses = [...new Set(auds.map(a => a.normalized_status))].sort().map(s => [s, unifiedStatusLabel(s, 'aud')]);
   fill('fAud', audStatuses);
 
-  const opStatuses = [...new Set(auds.flatMap(a => a.operations || []).map(o => o.normalized_status))].sort().map(s => [s, label(s)]);
+  const opStatuses = [...new Set(auds.flatMap(a => a.operations || []).map(o => o.normalized_status))].sort().map(s => [s, unifiedStatusLabel(s, 'op')]);
   fill('fOp', opStatuses);
 
-  const campStatuses = [...new Set(allCampaigns().map(c => c.normalized_status))].sort().map(s => [s, label(s)]);
+  const campStatuses = [...new Set(allCampaigns().map(c => c.normalized_status))].sort().map(s => [s, unifiedStatusLabel(s, 'camp')]);
   fill('cfStatus', campStatuses);
 }
 
 function opsSummary(a) {
-  if (a.operations_error) return '<span class="pill bad">error</span>';
+  if (a.operations_error) return '<span class="pill bad">Error</span>';
   const ops = a.operations || [];
   if (!ops.length) return '<span style="color:var(--text3)">none</span>';
   const counts = {};
   for (const o of ops) {
-    const k = `${o.normalized_status}|${o.status}`;
+    const k = o.normalized_status || 'neutral';
     counts[k] = (counts[k] || 0) + 1;
   }
-  return Object.entries(counts).map(([k, n]) => {
-    const [norm, raw] = k.split('|');
-    return `<span class="pill ${normTone(norm)}">${n} ${esc(label(raw))}</span>`;
-  }).join(' ') + (a.operations_has_more ? ' <span style="color:var(--text3)">+more</span>' : '');
+  const order = ['ready', 'processing', 'warning', 'failed', 'neutral'];
+  return order.filter(k => counts[k]).map(norm =>
+    `<span class="pill ${normTone(norm)}">${counts[norm]} ${esc(unifiedStatusLabel(norm, 'op'))}</span>`
+  ).join(' ') + (a.operations_has_more ? ' <span style="color:var(--text3)">+more</span>' : '');
 }
 
 function audienceDetail(a, opFilter) {
   const baseKv = [
     ['Platform', PLATFORM_LABELS[a.platform] || a.platform],
     ['Audience ID', a.id],
-    ['Status', a.status],
+    ['Status', `${unifiedStatusLabel(a.normalized_status, 'aud')} (raw: ${a.status})`],
     ['Type', a.audience_type || '—'],
     ['Matched Users', a.matched_users || '—'],
     ['Matched IDs', a.matched_ids || '—'],
@@ -426,7 +437,7 @@ function audienceDetail(a, opFilter) {
       <td style="color:var(--text3)">${i + 1}</td>
       <td class="mono">${esc(o.id)} ${copyBtn(o.id)}</td>
       <td>${esc(label(o.operation))}</td>
-      <td>${pill(o.status, o.normalized_status)}</td>
+      <td>${pill(o.status, o.normalized_status, 'op')}</td>
       <td class="num">${fmtInt(o.count)}</td>
       <td>${esc(fmtTime(o.created_at))}</td>
       <td style="white-space:normal;max-width:320px">${o.error ? `<span class="err">${esc(o.error)}</span>` : '<span style="color:var(--text3)">—</span>'}</td>
@@ -511,7 +522,7 @@ function renderCampaigns() {
     <td>${pbadge(c.platform)}</td>
     <td><div class="name">${esc(c.name)}</div><div class="desc">${esc(c.objective || '')}</div></td>
     <td class="mono">${esc(c.id)} ${copyBtn(c.id)}</td>
-    <td>${pill(c.status, c.normalized_status)}</td>
+    <td>${pill(c.status, c.normalized_status, 'camp')}</td>
     <td class="num">${esc(fmtMoney(c.spend, c.currency))}</td>
     <td class="num">${fmtInt(c.impressions)}</td>
     <td class="num">${fmtInt(c.clicks)}</td>

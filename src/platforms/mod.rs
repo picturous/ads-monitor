@@ -49,6 +49,9 @@ pub fn parse_timestamp(v: Option<&Value>) -> Option<i64> {
     match v? {
         Value::Number(n) => {
             let raw = n.as_i64()?;
+            if raw <= 0 {
+                return None;
+            }
             if raw > 10_000_000_000 {
                 Some(raw / 1000)
             } else {
@@ -61,6 +64,9 @@ pub fn parse_timestamp(v: Option<&Value>) -> Option<i64> {
                 return None;
             }
             if let Ok(raw) = s.parse::<i64>() {
+                if raw <= 0 {
+                    return None;
+                }
                 return Some(if raw > 10_000_000_000 {
                     raw / 1000
                 } else {
