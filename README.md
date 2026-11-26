@@ -43,6 +43,26 @@ A fast, single-binary Rust rewrite of `openaimonitor` expanded into a **unified 
    cargo run --release -- --json
    ```
 
+## Docker
+
+Images are automatically published to GitHub Container Registry (`ghcr.io/picturous/ads-monitor`) on every push to `main` and on `v*.*.*` git tags via [.github/workflows/release.yml](.github/workflows/release.yml).
+
+```bash
+# Quick preview with demo data
+docker run --rm -p 8000:8000 ghcr.io/picturous/ads-monitor:latest \
+  --demo --serve --host 0.0.0.0 --port 8000 --no-open
+
+# Run with your .env credentials
+docker run -d --name ads-monitor -p 8000:8000 --env-file .env \
+  ghcr.io/picturous/ads-monitor:latest
+```
+
+To cut a versioned release (builds & pushes `:vX.Y.Z`, `:X.Y`, `:X`, `:latest` + creates a GitHub Release):
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## TLS / Corporate Proxy Support
 
 Just like the original Python script used `truststore`, `ads-monitor` builds `reqwest` with `rustls-tls-native-roots` so it automatically trusts your operating system's native root CA certificates.

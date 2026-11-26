@@ -1,0 +1,9 @@
+/target
+.git
+.github
+.env
+*.html
+!templates/dashboard.html
+reference-python
+PLAN.md
+README.md
