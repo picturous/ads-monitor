@@ -10,54 +10,58 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Format, Clippy & Test
-    runs-on: ubuntu-latest
+  ci:
+    name: Format, Clippy, Test & Release Build (Self-Hosted)
+    runs-on: self-hosted
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Ensure Rust toolchain components
+        shell: bash
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if command -v rustup >/dev/null 2>&1; then
+            rustup component add rustfmt clippy
+          fi
+          rustc --version
+          cargo --version
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        shell: bash
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        shell: bash
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked -- --nocapture
-
-  build:
-    name: Release Build (${{ matrix.os }})
-    needs: check
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        shell: bash
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --locked -- --nocapture
 
       - name: Build release binary
-        run: cargo build --release --locked
+        shell: bash
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --release --locked
 
       - name: Smoke test demo mode
-        run: cargo run --release --locked -- --demo --no-open --out smoke-dashboard.html
+        shell: bash
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo run --release --locked -- --demo --no-open --out smoke-dashboard.html
+          rm -f smoke-dashboard.html
