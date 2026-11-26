@@ -44,6 +44,10 @@ pub struct AppConfig {
     pub lookback_days: u32,
     pub concurrency: usize,
     pub timeout_secs: u64,
+    pub db_path: Option<String>,
+    pub refresh_interval_mins: u64,
+    pub refresh_cron: Option<String>,
+    pub history_retention_days: u32,
     pub enable_audiences: bool,
     pub enable_campaigns: bool,
     pub audience_filter: Vec<String>,
@@ -183,6 +187,29 @@ impl AppConfig {
             .or_else(|| env_non_empty("ADS_MONITOR_TIMEOUT_SECS").and_then(|v| v.parse().ok()))
             .unwrap_or(30)
             .max(1);
+
+        let db_path = match env_non_empty("ADS_MONITOR_DB_PATH") {
+            Some(raw)
+                if matches!(
+                    raw.to_ascii_lowercase().as_str(),
+                    "none" | "off" | "disabled" | "memory" | ":memory:"
+                ) =>
+            {
+                None
+            }
+            Some(raw) => Some(raw),
+            None => Some("data/ads-monitor.db".to_string()),
+        };
+
+        let refresh_interval_mins = env_non_empty("ADS_MONITOR_REFRESH_INTERVAL_MINS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+
+        let refresh_cron = env_non_empty("ADS_MONITOR_REFRESH_CRON");
+
+        let history_retention_days = env_non_empty("ADS_MONITOR_HISTORY_RETENTION_DAYS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
 
         let enable_audiences = env_bool(&["ADS_MONITOR_ENABLE_AUDIENCES"], true);
         let enable_campaigns = env_bool(&["ADS_MONITOR_ENABLE_CAMPAIGNS"], true);
@@ -388,6 +415,10 @@ impl AppConfig {
             lookback_days,
             concurrency,
             timeout_secs,
+            db_path,
+            refresh_interval_mins,
+            refresh_cron,
+            history_retention_days,
             enable_audiences,
             enable_campaigns,
             audience_filter,

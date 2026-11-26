@@ -191,6 +191,15 @@ let cSortKey = 'spend', cSortDir = -1;
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtTime = t => t ? new Date(t * 1000).toLocaleString() : '—';
+const fmtRel = secs => {
+  const s = Math.max(0, Math.round(secs));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm ? `${h}h ${rm}m` : `${h}h`;
+};
 const fmtInt = n => n == null ? '—' : Number(n).toLocaleString();
 const fmtMoney = (v, cur) => {
   if (v == null) return '—';
@@ -223,25 +232,45 @@ function allCampaigns() {
   return (DATA.platforms || []).flatMap(p => p.campaigns || []);
 }
 
-function renderTop() {
-  const s = DATA.summary || {};
+function renderMetaLine() {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const ageStr = DATA.generated_at ? ` (${fmtRel(nowSec - DATA.generated_at)} ago)` : '';
   const demoTag = DATA.demo_mode ? ' · <span class="pill pr">DEMO MODE</span>' : '';
   const filterTag = (DATA.audience_filter && DATA.audience_filter.length)
     ? ` · <span class="pill nt">Filter: ${esc(DATA.audience_filter.join(', '))}</span>`
     : '';
+  let cacheTag = '';
+  if (DATA.cache) {
+    const c = DATA.cache;
+    const sched = c.refresh_cron
+      ? `cron ${c.refresh_cron}`
+      : (c.refresh_interval_mins > 0 ? `every ${c.refresh_interval_mins}m` : 'manual');
+    let nextPart = '';
+    if (c.next_refresh_at) {
+      const rem = c.next_refresh_at - nowSec;
+      nextPart = rem > 0 ? ` · next in ${fmtRel(rem)}` : ' · due now';
+    }
+    const syncPill = c.refreshing ? ' <span class="pill pr">Syncing…</span>' : '';
+    cacheTag = ` · <span class="pill nt" title="SQLite snapshots stored: ${esc(c.snapshot_count)}">Auto-refresh ${esc(sched)}${esc(nextPart)}</span>${syncPill}`;
+  }
   document.getElementById('meta').innerHTML =
-    `Generated ${esc(fmtTime(DATA.generated_at))} · Lookback ${esc(DATA.lookback_days)}d${filterTag}${demoTag}`;
+    `Updated ${esc(fmtTime(DATA.generated_at))}${esc(ageStr)} · Lookback ${esc(DATA.lookback_days)}d${cacheTag}${filterTag}${demoTag}`;
+}
+
+function renderTop() {
+  const s = DATA.summary || {};
+  renderMetaLine();
 
   const rb = document.getElementById('refresh');
   if (DATA.served) {
-    rb.textContent = 'Refresh';
+    rb.textContent = 'Refresh now';
     rb.disabled = false;
     rb.style.opacity = 1;
     rb.onclick = async () => {
       rb.disabled = true;
-      rb.textContent = 'Refreshing...';
+      rb.textContent = 'Syncing…';
       try {
-        const res = await fetch('/api/snapshot', { cache: 'no-store' });
+        const res = await fetch('/api/refresh', { method: 'POST', cache: 'no-store' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         DATA = await res.json();
         rebuildFilters();
@@ -250,7 +279,7 @@ function renderTop() {
         alert('Refresh failed: ' + e.message);
       } finally {
         rb.disabled = false;
-        rb.textContent = 'Refresh';
+        rb.textContent = 'Refresh now';
       }
     };
   } else {
@@ -617,6 +646,29 @@ document.getElementById('toggleAll').addEventListener('click', e => {
 
 rebuildFilters();
 renderAll();
+
+if (DATA.served) {
+  setInterval(() => {
+    renderMetaLine();
+  }, 15000);
+  setInterval(async () => {
+    try {
+      const c = DATA.cache;
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (c && c.next_refresh_at && nowSec < c.next_refresh_at + 3 && !c.refreshing) {
+        return;
+      }
+      const res = await fetch('/api/snapshot', { cache: 'no-store' });
+      if (!res.ok) return;
+      const next = await res.json();
+      if (next.generated_at !== DATA.generated_at || Boolean(next.cache?.refreshing) !== Boolean(DATA.cache?.refreshing)) {
+        DATA = next;
+        rebuildFilters();
+        renderAll();
+      }
+    } catch (_) {}
+  }, 30000);
+}
 </script>
 </body>
 </html>

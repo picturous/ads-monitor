@@ -81,6 +81,7 @@ pub async fn collect_all(client: &Client, cfg: &AppConfig, served: bool) -> Moni
         audiences_enabled: cfg.enable_audiences,
         campaigns_enabled: cfg.enable_campaigns,
         audience_filter: cfg.audience_filter.clone(),
+        cache: None,
         summary,
         platforms,
     }
@@ -574,6 +575,7 @@ pub fn demo_snapshot(lookback_days: u32, served: bool) -> MonitorSnapshot {
         audiences_enabled: true,
         campaigns_enabled: true,
         audience_filter: Vec::new(),
+        cache: None,
         summary,
         platforms,
     }

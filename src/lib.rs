@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod collector;
 pub mod config;
 pub mod error;

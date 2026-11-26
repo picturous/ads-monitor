@@ -1,3 +1,4 @@
+use ads_monitor::cache::SqliteCache;
 use ads_monitor::collector::{collect_all, demo_snapshot};
 use ads_monitor::config::{
     AppConfig, CollectOptions, FacebookConfig, GoogleAdsConfig, LineAdsConfig, LineOaAuth,
@@ -7,13 +8,12 @@ use ads_monitor::http::build_http_client;
 use ads_monitor::models::{NormalizedStatus, PlatformConnectionStatus, PlatformId};
 use ads_monitor::platforms::{facebook, google, line_ads, line_oa, openai, tiktok};
 use ads_monitor::render::render_html;
-use ads_monitor::server::{build_router, ServerState};
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use ads_monitor::server::{build_router, parse_cron_schedule, ServerState};
+use axum::body::{to_bytes, Body};
+use axum::http::{Method, Request, StatusCode};
 use base64::{engine::general_purpose::URL_SAFE, Engine};
 use chrono::{TimeZone, Utc};
 use serde_json::json;
-use std::sync::Arc;
 use tower::ServiceExt;
 use wiremock::matchers::{body_string_contains, header, header_exists, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -761,6 +761,10 @@ async fn test_unconfigured_platforms_and_axum_routes() {
         lookback_days: 30,
         concurrency: 4,
         timeout_secs: 10,
+        db_path: None,
+        refresh_interval_mins: 30,
+        refresh_cron: None,
+        history_retention_days: 30,
         enable_audiences: true,
         enable_campaigns: true,
         audience_filter: Vec::new(),
@@ -787,11 +791,7 @@ async fn test_unconfigured_platforms_and_axum_routes() {
     assert!(!html.contains("</script><script>alert(1)"));
     assert!(html.contains("<\\/script>"));
 
-    let state = Arc::new(ServerState {
-        client,
-        config: cfg,
-        demo: true,
-    });
+    let state = ServerState::with_cache(client, cfg, true, SqliteCache::open_in_memory().unwrap());
     let app = build_router(state);
 
     let health_resp = app
@@ -818,9 +818,179 @@ async fn test_unconfigured_platforms_and_axum_routes() {
         .unwrap();
     assert_eq!(snap_resp.status(), StatusCode::OK);
 
+    let hist_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/history")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hist_resp.status(), StatusCode::OK);
+    let hist_bytes = to_bytes(hist_resp.into_body(), 1024 * 1024).await.unwrap();
+    let hist_json: serde_json::Value = serde_json::from_slice(&hist_bytes).unwrap();
+    assert_eq!(hist_json["count"], 1);
+
     let index_resp = app
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(index_resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_sqlite_cache_serves_cached_snapshots_and_supports_manual_refresh() {
+    // 5-field and 6-field cron expressions must both parse cleanly
+    assert!(parse_cron_schedule("*/30 * * * *").is_ok());
+    assert!(parse_cron_schedule("0 */15 * * * *").is_ok());
+    assert!(parse_cron_schedule("not a cron").is_err());
+
+    let server = MockServer::start().await;
+    // Expect exactly 2 upstream calls: initial cold fetch + explicit POST /api/refresh.
+    // Subsequent GET /api/snapshot and GET / calls MUST be served from SQLite/memory cache.
+    Mock::given(method("GET"))
+        .and(path("/custom_audiences"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{
+                "id": "caud_cached",
+                "name": "CACHED_AUD",
+                "status": "ready"
+            }],
+            "has_more": false
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/custom_audiences/caud_cached/operations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [],
+            "has_more": false
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let tmp_db = std::env::temp_dir().join(format!(
+        "ads-monitor-test-{}-{}.db",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+
+    let cfg = AppConfig {
+        lookback_days: 30,
+        concurrency: 4,
+        timeout_secs: 10,
+        db_path: Some(tmp_db.display().to_string()),
+        refresh_interval_mins: 30,
+        refresh_cron: Some("*/30 * * * *".to_string()),
+        history_retention_days: 30,
+        enable_audiences: true,
+        enable_campaigns: false,
+        audience_filter: Vec::new(),
+        selected_platforms: vec![PlatformId::OpenAi],
+        openai: Some(OpenAiConfig {
+            api_key: "sk-cache-test".to_string(),
+            base_url: server.uri(),
+            options: CollectOptions {
+                enable_audiences: true,
+                enable_campaigns: false,
+                audience_filter: Vec::new(),
+            },
+        }),
+        facebook: None,
+        google: None,
+        tiktok: None,
+        line_oa: None,
+        line_ads: None,
+    };
+
+    let client = build_http_client(10).unwrap();
+    let state = ServerState::new(client.clone(), cfg.clone(), false);
+    let app = build_router(state);
+
+    // 1. First GET /api/snapshot triggers cold collection (upstream call #1)
+    let r1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/snapshot")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+    let b1 = to_bytes(r1.into_body(), 1024 * 1024).await.unwrap();
+    let j1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+    assert_eq!(j1["cache"]["cached"], false);
+    assert_eq!(j1["cache"]["snapshot_count"], 1);
+    assert_eq!(j1["cache"]["refresh_cron"], "*/30 * * * *");
+
+    // 2. Second GET /api/snapshot & GET / are served from cache (0 upstream calls)
+    let r2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/snapshot")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), StatusCode::OK);
+    let b2 = to_bytes(r2.into_body(), 1024 * 1024).await.unwrap();
+    let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+    assert_eq!(j2["cache"]["cached"], true);
+
+    let r_idx = app
+        .clone()
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(r_idx.status(), StatusCode::OK);
+
+    // 3. Re-opening ServerState from the same SQLite file loads cached snapshot without upstream calls!
+    let restarted = ServerState::new(client, cfg, false);
+    let restarted_app = build_router(restarted);
+    let r3 = restarted_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/snapshot")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let b3 = to_bytes(r3.into_body(), 1024 * 1024).await.unwrap();
+    let j3: serde_json::Value = serde_json::from_slice(&b3).unwrap();
+    assert_eq!(j3["cache"]["cached"], true);
+    assert_eq!(j3["platforms"][0]["audiences"][0]["name"], "CACHED_AUD");
+
+    // 4. Explicit POST /api/refresh triggers upstream call #2 and increments history
+    let r4 = restarted_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/refresh")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r4.status(), StatusCode::OK);
+    let b4 = to_bytes(r4.into_body(), 1024 * 1024).await.unwrap();
+    let j4: serde_json::Value = serde_json::from_slice(&b4).unwrap();
+    assert_eq!(j4["cache"]["cached"], false);
+    assert_eq!(j4["cache"]["snapshot_count"], 2);
+
+    // Cleanup temp sqlite files
+    let _ = std::fs::remove_file(&tmp_db);
+    let _ = std::fs::remove_file(format!("{}-wal", tmp_db.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", tmp_db.display()));
 }

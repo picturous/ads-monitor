@@ -23,9 +23,14 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --create-home appuser
+    && useradd --system --uid 10001 --create-home appuser \
+    && mkdir -p /data \
+    && chown appuser:appuser /data
 
 COPY --from=builder /app/target/release/ads-monitor /usr/local/bin/ads-monitor
+
+ENV ADS_MONITOR_DB_PATH=/data/ads-monitor.db
+VOLUME ["/data"]
 
 USER appuser
 EXPOSE 8000

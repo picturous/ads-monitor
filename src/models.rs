@@ -123,6 +123,35 @@ impl NormalizedStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheMeta {
+    pub cached: bool,
+    pub refreshing: bool,
+    pub refresh_interval_mins: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_cron: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_refresh_at: Option<i64>,
+    pub snapshot_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_refresh_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotHistoryEntry {
+    pub id: i64,
+    pub generated_at: i64,
+    pub lookback_days: u32,
+    pub healthy_platforms: usize,
+    pub configured_platforms: usize,
+    pub total_audiences: usize,
+    pub ready_audiences: usize,
+    pub total_operations: usize,
+    pub succeeded_operations: usize,
+    pub total_campaigns: usize,
+    pub active_campaigns: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitorSnapshot {
     pub generated_at: i64,
     pub lookback_days: u32,
@@ -131,6 +160,8 @@ pub struct MonitorSnapshot {
     pub audiences_enabled: bool,
     pub campaigns_enabled: bool,
     pub audience_filter: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheMeta>,
     pub summary: GlobalSummary,
     pub platforms: Vec<PlatformReport>,
 }

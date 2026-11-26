@@ -7,7 +7,6 @@ use ads_monitor::server::{build_router, ServerState};
 use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -57,6 +56,18 @@ struct Cli {
     #[arg(long)]
     timeout: Option<u64>,
 
+    /// SQLite database path for snapshot caching & history (default: data/ads-monitor.db; "none" for in-memory)
+    #[arg(long)]
+    db_path: Option<String>,
+
+    /// Auto-refresh interval in minutes in --serve mode (default: 30; 0 disables auto-refresh)
+    #[arg(long)]
+    refresh_interval: Option<u64>,
+
+    /// Optional cron expression for --serve auto-refresh (e.g. "*/30 * * * *"); overrides --refresh-interval
+    #[arg(long)]
+    refresh_cron: Option<String>,
+
     /// Path to .env file to load (defaults to .env in current working directory if present)
     #[arg(long)]
     env_file: Option<PathBuf>,
@@ -83,7 +94,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = dotenvy::dotenv();
     }
 
-    let config = AppConfig::from_env(cli.days, cli.workers, cli.timeout, cli.platforms);
+    let mut config = AppConfig::from_env(cli.days, cli.workers, cli.timeout, cli.platforms);
+    if let Some(raw_db) = cli.db_path {
+        let trimmed = raw_db.trim();
+        config.db_path = if matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "" | "none" | "off" | "disabled" | "memory" | ":memory:"
+        ) {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    if let Some(mins) = cli.refresh_interval {
+        config.refresh_interval_mins = mins;
+    }
+    if let Some(cron_expr) = cli.refresh_cron {
+        let trimmed = cron_expr.trim();
+        config.refresh_cron = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
     let client = build_http_client(config.timeout_secs)?;
 
     if !cli.demo && !config.has_any_configured() {
@@ -95,17 +128,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if cli.serve {
         let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse()?;
-        let state = Arc::new(ServerState {
-            client,
-            config,
-            demo: cli.demo,
-        });
+        let schedule_desc = if let Some(ref cron_expr) = config.refresh_cron {
+            format!("cron '{cron_expr}'")
+        } else if config.refresh_interval_mins > 0 {
+            format!("every {}m", config.refresh_interval_mins)
+        } else {
+            "manual only".to_string()
+        };
+        let state = ServerState::new(client, config, cli.demo);
+        let db_label = state.db_path_label().to_string();
+        let _bg = state.spawn_background_refresh();
         let router = build_router(state);
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let url = format!("http://{}:{}", cli.host, cli.port);
         println!(
             "Serving Ads Platform Monitor at {url} (Ctrl+C to stop).\n\
-             Endpoints: {url}/  |  {url}/api/snapshot  |  {url}/api/health"
+             Cache: {db_label}  |  Auto-refresh: {schedule_desc}\n\
+             Endpoints: {url}/  |  {url}/api/snapshot  |  POST {url}/api/refresh  |  {url}/api/history  |  {url}/api/health"
         );
         if !cli.no_open {
             let _ = open::that(&url);
