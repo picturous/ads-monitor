@@ -1,6 +1,6 @@
 /target
 .env
-dashboard.html
-demo-dashboard.html
-smoke-dashboard.html
-reference-python/
+/dashboard.html
+/demo-dashboard.html
+/smoke-dashboard.html
+/reference-python/

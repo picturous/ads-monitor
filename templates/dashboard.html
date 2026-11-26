@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ads Platform Monitor</title>
+<style>
+:root{
+  --bg:#faf9f5;--surface:#fff;--muted-bg:#f0eee6;--border:rgba(0,0,0,.09);--border-strong:rgba(0,0,0,.18);
+  --text:#1f1e1d;--text2:#5f5e5a;--text3:#888780;--accent:#185fa5;
+  --ok-bg:#eaf3de;--ok:#3b6d11;--pr-bg:#faeeda;--pr:#854f0b;--bad-bg:#fcebeb;--bad:#a32d2d;--nt-bg:#f1efe8;--nt:#5f5e5a;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#1a1a19;--surface:#232322;--muted-bg:#2c2c2a;--border:rgba(255,255,255,.08);--border-strong:rgba(255,255,255,.18);
+  --text:#ecebe7;--text2:#b4b2a9;--text3:#888780;--accent:#85b7eb;
+  --ok-bg:#27500a;--ok:#c0dd97;--pr-bg:#633806;--pr:#fac775;--bad-bg:#791f1f;--bad:#f7c1c1;--nt-bg:#444441;--nt:#d3d1c7;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1520px;margin:0 auto;padding:2rem 1.5rem 4rem}
+h1{font-size:22px;font-weight:600;margin:0;letter-spacing:-.01em}
+h2{font-size:15px;font-weight:600;margin:0 0 10px}
+.sub{color:var(--text2);font-size:13px;margin-top:4px}
+.mono{font-family:var(--mono);font-size:12px}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:1.25rem 0}
+.card{background:var(--muted-bg);border-radius:10px;padding:.9rem 1rem}
+.card .l{font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.03em}
+.card .v{font-size:24px;font-weight:600;margin-top:2px}
+.card .s{font-size:12px;color:var(--text2);margin-top:2px}
+
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px;margin:1rem 0 1.5rem}
+.pcard{background:var(--surface);border:.5px solid var(--border);border-radius:12px;padding:14px 16px;cursor:pointer;transition:border-color .15s,transform .1s}
+.pcard:hover{border-color:var(--border-strong)}
+.pcard.active{border:1.5px solid var(--accent)}
+.pcard.dim{opacity:.68}
+.phead{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+.ptitle{display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px}
+.pdot{width:9px;height:9px;border-radius:50%;display:inline-block;flex-shrink:0}
+.pmeta{font-size:12px;color:var(--text2);margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pmgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:6px 12px;font-size:12px}
+.pm .k{color:var(--text3);font-size:11px;text-transform:uppercase}
+.pm .v{font-weight:600;font-size:13px}
+.qbar{height:6px;background:var(--muted-bg);border-radius:999px;overflow:hidden;margin-top:8px}
+.qfill{height:100%;background:var(--accent);border-radius:999px}
+.perr{margin-top:8px;font-size:12px;color:var(--bad);background:var(--bad-bg);padding:6px 8px;border-radius:6px;word-break:break-word}
+.phint{margin-top:8px;font-size:12px;color:var(--text2)}
+
+.tabs{display:flex;gap:6px;border-bottom:.5px solid var(--border);margin-bottom:14px}
+.tab{border:none;background:none;padding:8px 14px;height:auto;border-radius:8px 8px 0 0;color:var(--text2);font-weight:500;border-bottom:2px solid transparent;cursor:pointer}
+.tab.active{color:var(--text);border-bottom-color:var(--accent)}
+.tab:hover{background:var(--muted-bg)}
+
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+input,select,button{font:inherit;color:var(--text);background:var(--surface);border:.5px solid var(--border-strong);border-radius:8px;height:34px;padding:0 10px}
+input{min-width:220px;flex:1;max-width:360px}
+button{cursor:pointer}button:hover{background:var(--muted-bg)}
+.warn{background:var(--pr-bg);color:var(--pr);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:13px}
+.wrap{background:var(--surface);border:.5px solid var(--border);border-radius:12px;overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th,td{padding:9px 12px;text-align:left;border-bottom:.5px solid var(--border);white-space:nowrap;vertical-align:middle}
+th{font-weight:500;color:var(--text2);font-size:13px;cursor:pointer;user-select:none}
+th.nosort{cursor:default}
+tr.aud{cursor:pointer}tr.aud:hover{background:var(--muted-bg)}
+.name{font-weight:500}.desc{color:var(--text2);font-size:12px;max-width:280px;overflow:hidden;text-overflow:ellipsis}
+.pill{display:inline-block;font-size:12px;padding:1px 8px;border-radius:8px;line-height:20px;font-weight:500}
+.ok{background:var(--ok-bg);color:var(--ok)}.pr{background:var(--pr-bg);color:var(--pr)}
+.bad{background:var(--bad-bg);color:var(--bad)}.nt{background:var(--nt-bg);color:var(--nt)}
+.pbadge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;padding:2px 8px;border-radius:999px;background:var(--muted-bg);color:var(--text)}
+.chev{display:inline-block;transition:transform .15s;color:var(--text3);width:14px}
+tr.open .chev{transform:rotate(90deg)}
+td.detail{background:var(--bg);padding:16px 20px 20px;white-space:normal}
+.dwrap{position:sticky;left:20px;width:min(1420px,calc(100vw - 90px))}
+td.opsum{white-space:normal;min-width:150px;max-width:240px}
+td.opsum .pill{margin:1px 0}
+.kv{display:grid;grid-template-columns:max-content 1fr max-content 1fr;gap:4px 16px;margin-bottom:16px;font-size:13px}
+.kv .k{color:var(--text2)}.kv .v{word-break:break-all}
+.ops{background:var(--surface);border:.5px solid var(--border);border-radius:8px;overflow:hidden}
+.ops th{cursor:default}.ops tr:last-child td{border-bottom:none}
+.copy{border:none;background:none;height:auto;padding:0 4px;color:var(--text3);font-size:12px}
+.err{color:var(--bad);font-size:13px}
+.empty{color:var(--text3);padding:2rem;text-align:center}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <div>
+      <h1>Ads Platform Monitor</h1>
+      <div class="sub" id="meta"></div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button id="clearPlat" class="hidden">Show all platforms</button>
+      <button id="refresh"></button>
+    </div>
+  </div>
+
+  <div class="cards" id="cards"></div>
+  <div id="warnings"></div>
+
+  <h2>Platforms</h2>
+  <div class="pgrid" id="pgrid"></div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="audiences" id="tabAud">Audiences &amp; Operations</button>
+    <button class="tab" data-tab="campaigns" id="tabCamp">Campaigns &amp; Spend</button>
+  </div>
+
+  <section id="sec-audiences">
+    <div class="bar">
+      <input id="q" placeholder="Search audience name, description, type, or ID">
+      <select id="fPlat"><option value="">All platforms</option></select>
+      <select id="fAud"><option value="">All statuses</option></select>
+      <select id="fOp"><option value="">All operation statuses</option></select>
+      <button id="toggleAll">Expand all</button>
+    </div>
+
+    <div class="wrap">
+      <table>
+        <thead><tr>
+          <th class="nosort"></th>
+          <th data-k="platform">Platform</th>
+          <th data-k="name">Audience</th>
+          <th data-k="id">ID</th>
+          <th data-k="status">Status</th>
+          <th data-k="matched_users">Matched / Size</th>
+          <th data-k="match_rate_pct">Match %</th>
+          <th data-k="audience_type">Type</th>
+          <th data-k="_ops">Operations / Jobs</th>
+          <th data-k="updated_at">Updated</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="sec-campaigns" class="hidden">
+    <div class="bar">
+      <input id="cq" placeholder="Search campaign name, objective, or ID">
+      <select id="cfPlat"><option value="">All platforms</option></select>
+      <select id="cfStatus"><option value="">All statuses</option></select>
+    </div>
+    <div class="wrap">
+      <table>
+        <thead><tr>
+          <th data-ck="platform">Platform</th>
+          <th data-ck="name">Campaign</th>
+          <th data-ck="id">ID</th>
+          <th data-ck="status">Status</th>
+          <th data-ck="spend" class="num">Spend</th>
+          <th data-ck="impressions" class="num">Impressions</th>
+          <th data-ck="clicks" class="num">Clicks</th>
+          <th data-ck="ctr" class="num">CTR</th>
+          <th data-ck="cpc" class="num">CPC</th>
+          <th data-ck="conversions" class="num">Conversions</th>
+        </tr></thead>
+        <tbody id="crows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+let DATA = __DATA__;
+
+const PLATFORM_COLORS = {
+  open_ai: '#10a37f',
+  facebook: '#1877f2',
+  google: '#ea4335',
+  tiktok: '#fe2c55',
+  line_oa: '#06c755',
+  line_ads: '#00b900',
+};
+const PLATFORM_LABELS = {
+  open_ai: 'OpenAI Ads',
+  facebook: 'Meta Ads',
+  google: 'Google Ads',
+  tiktok: 'TikTok Ads',
+  line_oa: 'LINE OA',
+  line_ads: 'LINE Ads',
+};
+
+const open = new Set();
+let activeTab = 'audiences';
+let selectedPlatform = '';
+let sortKey = 'updated_at', sortDir = -1;
+let cSortKey = 'spend', cSortDir = -1;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtTime = t => t ? new Date(t * 1000).toLocaleString() : '—';
+const fmtInt = n => n == null ? '—' : Number(n).toLocaleString();
+const fmtMoney = (v, cur) => {
+  if (v == null) return '—';
+  const num = Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  return cur ? `${cur} ${num}` : num;
+};
+const fmtPct = v => v == null ? '—' : `${Number(v).toFixed(2)}%`;
+const label = s => s == null || s === '' ? '—' : String(s).replace(/_/g, ' ');
+const normTone = n => ({ready:'ok', processing:'pr', failed:'bad', warning:'pr', neutral:'nt'}[n] || 'nt');
+const connTone = s => ({ok:'ok', partial:'pr', error:'bad', unconfigured:'nt'}[s] || 'nt');
+const pill = (text, norm) => `<span class="pill ${normTone(norm)}">${esc(label(text))}</span>`;
+const pbadge = p => `<span class="pbadge"><span class="pdot" style="background:${PLATFORM_COLORS[p] || '#888'}"></span>${esc(PLATFORM_LABELS[p] || p)}</span>`;
+const copyBtn = v => `<button class="copy" data-copy="${esc(v)}" title="Copy">copy</button>`;
+
+function allAudiences() {
+  return (DATA.platforms || []).flatMap(p => p.audiences || []);
+}
+function allCampaigns() {
+  return (DATA.platforms || []).flatMap(p => p.campaigns || []);
+}
+
+function renderTop() {
+  const s = DATA.summary || {};
+  const demoTag = DATA.demo_mode ? ' · <span class="pill pr">DEMO MODE</span>' : '';
+  document.getElementById('meta').innerHTML =
+    `Generated ${esc(fmtTime(DATA.generated_at))} · Lookback ${esc(DATA.lookback_days)}d${demoTag}`;
+
+  const rb = document.getElementById('refresh');
+  if (DATA.served) {
+    rb.textContent = 'Refresh';
+    rb.disabled = false;
+    rb.style.opacity = 1;
+    rb.onclick = async () => {
+      rb.disabled = true;
+      rb.textContent = 'Refreshing...';
+      try {
+        const res = await fetch('/api/snapshot', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        DATA = await res.json();
+        rebuildFilters();
+        renderAll();
+      } catch (e) {
+        alert('Refresh failed: ' + e.message);
+      } finally {
+        rb.disabled = false;
+        rb.textContent = 'Refresh';
+      }
+    };
+  } else {
+    rb.textContent = 'Re-run binary to refresh';
+    rb.disabled = true;
+    rb.style.opacity = .6;
+  }
+
+  const cards = [
+    ['Platforms', `${s.healthy_platforms || 0}/${s.configured_platforms || 0}`, s.error_platforms ? `${s.error_platforms} error` : 'Configured & healthy'],
+    ['Audiences', s.total_audiences || 0, `${s.ready_audiences || 0} ready · ${s.failed_audiences || 0} failed`],
+    ['Operations', s.total_operations || 0, `${s.succeeded_operations || 0} ok · ${s.processing_operations || 0} running`],
+    ['Campaigns', s.total_campaigns || 0, `${s.active_campaigns || 0} active`],
+  ];
+  document.getElementById('cards').innerHTML = cards.map(([l, v, sub]) =>
+    `<div class="card"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${esc(sub)}</div></div>`
+  ).join('');
+
+  const warns = [];
+  for (const p of (DATA.platforms || [])) {
+    if (p.status === 'error' && p.error) {
+      warns.push(`[${p.display_name}] ${p.error}`);
+    } else if (p.status !== 'unconfigured') {
+      for (const w of (p.warnings || [])) warns.push(`[${p.display_name}] ${w}`);
+    }
+  }
+  document.getElementById('warnings').innerHTML = warns.map(w => `<div class="warn">${esc(w)}</div>`).join('');
+
+  document.getElementById('tabAud').textContent = `Audiences & Operations (${allAudiences().length})`;
+  document.getElementById('tabCamp').textContent = `Campaigns & Spend (${allCampaigns().length})`;
+}
+
+function renderPlatformCards() {
+  const clearBtn = document.getElementById('clearPlat');
+  clearBtn.classList.toggle('hidden', !selectedPlatform);
+
+  document.getElementById('pgrid').innerHTML = (DATA.platforms || []).map(p => {
+    const isSel = selectedPlatform === p.platform;
+    const dim = p.status === 'unconfigured' ? ' dim' : '';
+    const color = PLATFORM_COLORS[p.platform] || '#888';
+    const acct = [p.account_name, p.account_id].filter(Boolean).join(' · ') || p.base_url;
+    const m = p.metrics;
+
+    let body = '';
+    if (p.status === 'unconfigured') {
+      body = `<div class="phint">${esc((p.warnings || [])[0] || 'Not configured')}</div>`;
+    } else if (p.status === 'error') {
+      body = `<div class="perr">${esc(p.error || 'Request failed')}</div>`;
+    } else if (p.platform === 'line_oa' && m) {
+      const used = m.quota_used ?? 0;
+      const lim = m.quota_limit ?? 0;
+      const pct = lim > 0 ? Math.min(100, (used / lim) * 100) : 0;
+      body = `<div class="pmgrid">
+        <div class="pm"><div class="k">Quota Used</div><div class="v">${fmtInt(m.quota_used)}${lim ? ' / ' + fmtInt(lim) : ''}</div></div>
+        <div class="pm"><div class="k">Followers</div><div class="v">${fmtInt(m.followers)}</div></div>
+        <div class="pm"><div class="k">Target Reach</div><div class="v">${fmtInt(m.targeted_reaches)}</div></div>
+        <div class="pm"><div class="k">Audiences</div><div class="v">${p.audiences.length}</div></div>
+      </div>${lim > 0 ? `<div class="qbar" title="${pct.toFixed(1)}% of monthly quota"><div class="qfill" style="width:${pct.toFixed(1)}%"></div></div>` : ''}`;
+    } else if (m) {
+      body = `<div class="pmgrid">
+        <div class="pm"><div class="k">Spend (${esc(DATA.lookback_days)}d)</div><div class="v">${esc(fmtMoney(m.spend, m.currency))}</div></div>
+        <div class="pm"><div class="k">${m.balance != null ? 'Balance' : 'Impressions'}</div><div class="v">${m.balance != null ? esc(fmtMoney(m.balance, m.currency)) : fmtInt(m.impressions)}</div></div>
+        <div class="pm"><div class="k">Clicks / CTR</div><div class="v">${fmtInt(m.clicks)}${m.ctr != null ? ' · ' + fmtPct(m.ctr) : ''}</div></div>
+        <div class="pm"><div class="k">Audiences / Camp.</div><div class="v">${p.audiences.length} / ${p.campaigns.length}</div></div>
+      </div>`;
+    } else {
+      const ops = p.audiences.reduce((n, a) => n + (a.operations || []).length, 0);
+      body = `<div class="pmgrid">
+        <div class="pm"><div class="k">Audiences</div><div class="v">${p.audiences.length}</div></div>
+        <div class="pm"><div class="k">Operations</div><div class="v">${ops}</div></div>
+        <div class="pm"><div class="k">Latency</div><div class="v">${p.duration_ms} ms</div></div>
+        <div class="pm"><div class="k">Policy Rev</div><div class="v mono">${esc((p.policy_revision || '—').slice(0, 10))}</div></div>
+      </div>`;
+    }
+
+    return `<div class="pcard${isSel ? ' active' : ''}${dim}" data-plat="${esc(p.platform)}">
+      <div class="phead">
+        <div class="ptitle"><span class="pdot" style="background:${color}"></span>${esc(p.display_name)}</div>
+        <span class="pill ${connTone(p.status)}">${esc(label(p.status))}${p.duration_ms ? ` · ${p.duration_ms}ms` : ''}</span>
+      </div>
+      <div class="pmeta mono" title="${esc(acct)}">${esc(acct)}</div>
+      ${body}
+    </div>`;
+  }).join('');
+}
+
+function rebuildFilters() {
+  const fill = (id, pairs) => {
+    const el = document.getElementById(id);
+    const prev = el.value;
+    const first = el.options[0].outerHTML;
+    el.innerHTML = first + pairs.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
+    el.value = prev;
+  };
+  const plats = (DATA.platforms || []).map(p => [p.platform, p.display_name]);
+  fill('fPlat', plats);
+  fill('cfPlat', plats);
+
+  const auds = allAudiences();
+  const audStatuses = [...new Set(auds.map(a => a.normalized_status))].sort().map(s => [s, label(s)]);
+  fill('fAud', audStatuses);
+
+  const opStatuses = [...new Set(auds.flatMap(a => a.operations || []).map(o => o.normalized_status))].sort().map(s => [s, label(s)]);
+  fill('fOp', opStatuses);
+
+  const campStatuses = [...new Set(allCampaigns().map(c => c.normalized_status))].sort().map(s => [s, label(s)]);
+  fill('cfStatus', campStatuses);
+}
+
+function opsSummary(a) {
+  if (a.operations_error) return '<span class="pill bad">error</span>';
+  const ops = a.operations || [];
+  if (!ops.length) return '<span style="color:var(--text3)">none</span>';
+  const counts = {};
+  for (const o of ops) {
+    const k = `${o.normalized_status}|${o.status}`;
+    counts[k] = (counts[k] || 0) + 1;
+  }
+  return Object.entries(counts).map(([k, n]) => {
+    const [norm, raw] = k.split('|');
+    return `<span class="pill ${normTone(norm)}">${n} ${esc(label(raw))}</span>`;
+  }).join(' ') + (a.operations_has_more ? ' <span style="color:var(--text3)">+more</span>' : '');
+}
+
+function audienceDetail(a, opFilter) {
+  const baseKv = [
+    ['Platform', PLATFORM_LABELS[a.platform] || a.platform],
+    ['Audience ID', a.id],
+    ['Status', a.status],
+    ['Type', a.audience_type || '—'],
+    ['Matched Users', a.matched_users || '—'],
+    ['Matched IDs', a.matched_ids || '—'],
+    ['Uploaded IDs', a.uploaded_ids || '—'],
+    ['Invalid IDs', a.invalid_ids || '—'],
+    ['Match Rate', a.match_rate_pct != null ? `${a.match_rate_pct}%` : '—'],
+    ['Revision', a.revision || '—'],
+    ['Created', fmtTime(a.created_at)],
+    ['Updated', fmtTime(a.updated_at)],
+  ].filter(([, v]) => v !== '—' && v !== '');
+
+  for (const [k, v] of Object.entries(a.extra || {})) {
+    const val = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    baseKv.push([label(k), val]);
+  }
+
+  const kvHtml = baseKv.map(([k, v]) =>
+    `<div class="k">${esc(k)}</div><div class="v"><span class="mono">${esc(v)}</span></div>`
+  ).join('');
+
+  let ops = a.operations || [];
+  if (opFilter) ops = ops.filter(o => o.normalized_status === opFilter);
+
+  let body;
+  if (a.operations_error) {
+    body = `<div class="err">${esc(a.operations_error)}</div>`;
+  } else if (!ops.length) {
+    body = `<div class="empty">No operations / sync jobs${opFilter ? ' with this status' : ''}.</div>`;
+  } else {
+    body = `<div class="ops"><table><thead><tr>
+      <th>#</th><th>Operation / Job ID</th><th>Type</th><th>Status</th><th>Count</th><th>Created</th><th>Error / Details</th>
+    </tr></thead><tbody>${ops.map((o, i) => `<tr>
+      <td style="color:var(--text3)">${i + 1}</td>
+      <td class="mono">${esc(o.id)} ${copyBtn(o.id)}</td>
+      <td>${esc(label(o.operation))}</td>
+      <td>${pill(o.status, o.normalized_status)}</td>
+      <td class="num">${fmtInt(o.count)}</td>
+      <td>${esc(fmtTime(o.created_at))}</td>
+      <td style="white-space:normal;max-width:320px">${o.error ? `<span class="err">${esc(o.error)}</span>` : '<span style="color:var(--text3)">—</span>'}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+  }
+
+  return `<div class="dwrap"><div class="kv">${kvHtml}</div><div style="font-weight:600;margin-bottom:8px">Operations / Jobs (${ops.length})</div>${body}</div>`;
+}
+
+function renderAudiences() {
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const fp = selectedPlatform || document.getElementById('fPlat').value;
+  const fa = document.getElementById('fAud').value;
+  const fo = document.getElementById('fOp').value;
+
+  let list = allAudiences().filter(a =>
+    (!fp || a.platform === fp) &&
+    (!q || [a.name, a.description, a.id, a.audience_type, a.platform].some(v => String(v || '').toLowerCase().includes(q))) &&
+    (!fa || a.normalized_status === fa) &&
+    (!fo || (a.operations || []).some(o => o.normalized_status === fo))
+  );
+
+  list.sort((x, y) => {
+    const g = a => sortKey === '_ops' ? (a.operations || []).length : (a[sortKey] ?? '');
+    const vx = g(x), vy = g(y);
+    return (vx > vy ? 1 : vx < vy ? -1 : 0) * sortDir;
+  });
+
+  document.querySelectorAll('th[data-k]').forEach(th =>
+    th.textContent = th.textContent.replace(/ [↑↓]$/, '') + (th.dataset.k === sortKey ? (sortDir > 0 ? ' ↑' : ' ↓') : ''));
+
+  const rows = document.getElementById('rows');
+  if (!list.length) {
+    rows.innerHTML = '<tr><td colspan="10" class="empty">No audiences match the current filter.</td></tr>';
+    return;
+  }
+
+  rows.innerHTML = list.map(a => {
+    const key = `${a.platform}:${a.id}`;
+    const isOpen = open.has(key);
+    return `<tr class="aud${isOpen ? ' open' : ''}" data-key="${esc(key)}">
+      <td><span class="chev">›</span></td>
+      <td>${pbadge(a.platform)}</td>
+      <td><div class="name">${esc(a.name || '(unnamed)')}</div><div class="desc" title="${esc(a.description)}">${esc(a.description || '')}</div></td>
+      <td class="mono">${esc(a.id)} ${copyBtn(a.id)}</td>
+      <td>${pill(a.status, a.normalized_status)}</td>
+      <td>${esc(a.matched_users || '—')}</td>
+      <td>${a.match_rate_pct != null ? `${a.match_rate_pct}%` : '—'}</td>
+      <td class="mono">${esc(a.audience_type || '—')}</td>
+      <td class="opsum">${opsSummary(a)}</td>
+      <td>${esc(fmtTime(a.updated_at))}</td>
+    </tr>${isOpen ? `<tr><td colspan="10" class="detail">${audienceDetail(a, fo)}</td></tr>` : ''}`;
+  }).join('');
+}
+
+function renderCampaigns() {
+  const q = document.getElementById('cq').value.trim().toLowerCase();
+  const fp = selectedPlatform || document.getElementById('cfPlat').value;
+  const fs = document.getElementById('cfStatus').value;
+
+  let list = allCampaigns().filter(c =>
+    (!fp || c.platform === fp) &&
+    (!q || [c.name, c.objective, c.id, c.platform].some(v => String(v || '').toLowerCase().includes(q))) &&
+    (!fs || c.normalized_status === fs)
+  );
+
+  list.sort((x, y) => {
+    const vx = x[cSortKey] ?? -1, vy = y[cSortKey] ?? -1;
+    return (vx > vy ? 1 : vx < vy ? -1 : 0) * cSortDir;
+  });
+
+  document.querySelectorAll('th[data-ck]').forEach(th =>
+    th.textContent = th.textContent.replace(/ [↑↓]$/, '') + (th.dataset.ck === cSortKey ? (cSortDir > 0 ? ' ↑' : ' ↓') : ''));
+
+  const crows = document.getElementById('crows');
+  if (!list.length) {
+    crows.innerHTML = '<tr><td colspan="10" class="empty">No campaigns match the current filter.</td></tr>';
+    return;
+  }
+
+  crows.innerHTML = list.map(c => `<tr>
+    <td>${pbadge(c.platform)}</td>
+    <td><div class="name">${esc(c.name)}</div><div class="desc">${esc(c.objective || '')}</div></td>
+    <td class="mono">${esc(c.id)} ${copyBtn(c.id)}</td>
+    <td>${pill(c.status, c.normalized_status)}</td>
+    <td class="num">${esc(fmtMoney(c.spend, c.currency))}</td>
+    <td class="num">${fmtInt(c.impressions)}</td>
+    <td class="num">${fmtInt(c.clicks)}</td>
+    <td class="num">${fmtPct(c.ctr)}</td>
+    <td class="num">${esc(fmtMoney(c.cpc, c.currency))}</td>
+    <td class="num">${c.conversions != null ? Number(c.conversions).toLocaleString(undefined, {maximumFractionDigits: 1}) : '—'}</td>
+  </tr>`).join('');
+}
+
+function renderAll() {
+  renderTop();
+  renderPlatformCards();
+  renderAudiences();
+  renderCampaigns();
+}
+
+document.getElementById('pgrid').addEventListener('click', e => {
+  const card = e.target.closest('.pcard');
+  if (!card) return;
+  const p = card.dataset.plat;
+  selectedPlatform = selectedPlatform === p ? '' : p;
+  document.getElementById('fPlat').value = selectedPlatform;
+  document.getElementById('cfPlat').value = selectedPlatform;
+  renderAll();
+});
+
+document.getElementById('clearPlat').addEventListener('click', () => {
+  selectedPlatform = '';
+  document.getElementById('fPlat').value = '';
+  document.getElementById('cfPlat').value = '';
+  renderAll();
+});
+
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+  activeTab = btn.dataset.tab;
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
+  document.getElementById('sec-audiences').classList.toggle('hidden', activeTab !== 'audiences');
+  document.getElementById('sec-campaigns').classList.toggle('hidden', activeTab !== 'campaigns');
+}));
+
+document.getElementById('rows').addEventListener('click', e => {
+  const c = e.target.closest('[data-copy]');
+  if (c) {
+    e.stopPropagation();
+    navigator.clipboard?.writeText(c.dataset.copy).then(() => { c.textContent = 'copied'; setTimeout(() => c.textContent = 'copy', 1200); });
+    return;
+  }
+  const tr = e.target.closest('tr.aud');
+  if (!tr) return;
+  open.has(tr.dataset.key) ? open.delete(tr.dataset.key) : open.add(tr.dataset.key);
+  renderAudiences();
+});
+
+document.getElementById('crows').addEventListener('click', e => {
+  const c = e.target.closest('[data-copy]');
+  if (c) {
+    e.stopPropagation();
+    navigator.clipboard?.writeText(c.dataset.copy).then(() => { c.textContent = 'copied'; setTimeout(() => c.textContent = 'copy', 1200); });
+  }
+});
+
+document.querySelectorAll('th[data-k]').forEach(th => th.addEventListener('click', () => {
+  if (sortKey === th.dataset.k) sortDir *= -1; else { sortKey = th.dataset.k; sortDir = 1; }
+  renderAudiences();
+}));
+document.querySelectorAll('th[data-ck]').forEach(th => th.addEventListener('click', () => {
+  if (cSortKey === th.dataset.ck) cSortDir *= -1; else { cSortKey = th.dataset.ck; cSortDir = -1; }
+  renderCampaigns();
+}));
+
+['q', 'fPlat', 'fAud', 'fOp'].forEach(id => document.getElementById(id).addEventListener('input', () => {
+  if (id === 'fPlat') selectedPlatform = document.getElementById('fPlat').value;
+  renderPlatformCards();
+  renderAudiences();
+}));
+['cq', 'cfPlat', 'cfStatus'].forEach(id => document.getElementById(id).addEventListener('input', () => {
+  if (id === 'cfPlat') selectedPlatform = document.getElementById('cfPlat').value;
+  renderPlatformCards();
+  renderCampaigns();
+}));
+
+document.getElementById('toggleAll').addEventListener('click', e => {
+  const auds = allAudiences();
+  const expand = open.size < auds.length;
+  auds.forEach(a => {
+    const key = `${a.platform}:${a.id}`;
+    expand ? open.add(key) : open.delete(key);
+  });
+  e.target.textContent = expand ? 'Collapse all' : 'Expand all';
+  renderAudiences();
+});
+
+rebuildFilters();
+renderAll();
+</script>
+</body>
+</html>
