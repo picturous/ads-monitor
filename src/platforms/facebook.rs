@@ -8,6 +8,7 @@ use crate::models::{
 use crate::platforms::{
     date_window_ymd, extra_from_object, json_f64, json_i64, json_str, json_u64, parse_timestamp,
 };
+use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
 use serde_json::Value;
@@ -17,6 +18,7 @@ const AUDIENCE_FIELDS: &str = "id,name,description,subtype,delivery_status,opera
 const ACCOUNT_FIELDS: &str = "id,name,account_status,currency,amount_spent,balance,spend_cap";
 const CAMPAIGN_FIELDS: &str = "id,name,status,effective_status,objective";
 const MAX_AUDIENCE_PAGES: usize = 10;
+const UNCLOSED_SESSION_STALE_SECS: i64 = 24 * 60 * 60;
 
 fn minor_unit_divisor(currency: Option<&str>) -> f64 {
     match currency.unwrap_or("USD").to_ascii_uppercase().as_str() {
@@ -169,11 +171,89 @@ async fn fetch_all_audiences(
     Ok((items, has_more))
 }
 
+struct SessionTarget {
+    idx: usize,
+    id: String,
+    subtype: Option<String>,
+    audience_status: NormalizedStatus,
+    content_updated_at: Option<i64>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_session_status(
+    stage: &str,
+    progress: Option<&str>,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    num_received: Option<u64>,
+    audience_status: NormalizedStatus,
+    content_updated_at: Option<i64>,
+    now_unix: i64,
+) -> (String, NormalizedStatus) {
+    let stage_lower = stage.to_ascii_lowercase();
+    match (stage_lower.as_str(), progress, end_time) {
+        (st, _, _) if st.contains("fail") || st.contains("error") => {
+            (stage.to_string(), NormalizedStatus::Failed)
+        }
+        ("completed" | "finished" | "done" | "succeeded" | "success", _, _) => {
+            (stage.to_string(), NormalizedStatus::Ready)
+        }
+        (_, Some("100"), _) => ("completed".to_string(), NormalizedStatus::Ready),
+        (_, Some(p), _) if p.eq_ignore_ascii_case("completed") => {
+            ("completed".to_string(), NormalizedStatus::Ready)
+        }
+        (_, _, Some(_)) => ("completed".to_string(), NormalizedStatus::Ready),
+        ("uploading" | "processing" | "pending" | "queued" | "running", p, None) => {
+            // Meta leaves CustomAudienceSession permanently at stage="uploading",
+            // progress="0", end_time="0" when uploaders do not send
+            // `session.last_batch_flag = true` (or use non-session /users calls),
+            // even after Meta finishes ingesting the rows into the audience.
+            let progress_untracked = matches!(p, None | Some("0") | Some(""));
+            let received_rows = num_received.unwrap_or(0) > 0;
+            let audience_settled = matches!(
+                audience_status,
+                NormalizedStatus::Ready | NormalizedStatus::Warning
+            );
+            let already_ingested = match (start_time, content_updated_at) {
+                (Some(st), Some(tcu)) if tcu >= st => true,
+                (Some(st), _) if now_unix - st >= UNCLOSED_SESSION_STALE_SECS => true,
+                _ => false,
+            };
+            if stage_lower == "uploading"
+                && progress_untracked
+                && received_rows
+                && audience_settled
+                && already_ingested
+            {
+                ("uploading (ingested)".to_string(), NormalizedStatus::Ready)
+            } else if let Some(pct) = p.filter(|s| !s.is_empty() && *s != "0") {
+                if pct.chars().all(|c| c.is_ascii_digit()) {
+                    (format!("{stage} ({pct}%)"), NormalizedStatus::Processing)
+                } else {
+                    (stage.to_string(), NormalizedStatus::Processing)
+                }
+            } else {
+                (stage.to_string(), NormalizedStatus::Processing)
+            }
+        }
+        (_, Some(p), None) if p.chars().all(|c| c.is_ascii_digit()) => {
+            (format!("{stage} ({p}%)"), NormalizedStatus::Processing)
+        }
+        _ => {
+            let raw = progress.unwrap_or(stage).to_string();
+            let norm = NormalizedStatus::from_raw(&raw);
+            (raw, norm)
+        }
+    }
+}
+
 async fn fetch_sessions(
     client: &Client,
     cfg: &FacebookConfig,
     audience_id: &str,
     subtype: Option<&str>,
+    audience_status: NormalizedStatus,
+    content_updated_at: Option<i64>,
 ) -> (Vec<OperationRecord>, bool, Option<String>) {
     if let Some(st) = subtype {
         let u = st.to_ascii_uppercase();
@@ -182,6 +262,7 @@ async fn fetch_sessions(
         }
     }
 
+    let now_unix = Utc::now().timestamp();
     let path = format!("{audience_id}/sessions");
     match graph_get(client, cfg, &path, &[]).await {
         Ok(res) => {
@@ -195,43 +276,19 @@ async fn fetch_sessions(
                             let stage = json_str(s, "stage")
                                 .unwrap_or_else(|| "upload_session".to_string());
                             let progress = json_str(s, "progress");
+                            let start_time = parse_timestamp(s.get("start_time"));
                             let end_time = parse_timestamp(s.get("end_time"));
-                            let (status, normalized_status) = match (
-                                stage.to_ascii_lowercase().as_str(),
+                            let num_received = json_u64(s, "num_received");
+                            let (status, normalized_status) = classify_session_status(
+                                &stage,
                                 progress.as_deref(),
+                                start_time,
                                 end_time,
-                            ) {
-                                (st, _, _) if st.contains("fail") || st.contains("error") => {
-                                    (stage.clone(), NormalizedStatus::Failed)
-                                }
-                                (
-                                    "completed" | "finished" | "done" | "succeeded" | "success",
-                                    _,
-                                    _,
-                                ) => (stage.clone(), NormalizedStatus::Ready),
-                                (_, Some("100"), _) => {
-                                    ("completed".to_string(), NormalizedStatus::Ready)
-                                }
-                                (_, Some(p), _) if p.eq_ignore_ascii_case("completed") => {
-                                    ("completed".to_string(), NormalizedStatus::Ready)
-                                }
-                                (
-                                    "uploading" | "processing" | "pending" | "queued" | "running",
-                                    _,
-                                    _,
-                                ) => (stage.clone(), NormalizedStatus::Processing),
-                                (_, _, Some(_)) => {
-                                    ("completed".to_string(), NormalizedStatus::Ready)
-                                }
-                                (_, Some(p), None) if p.chars().all(|c| c.is_ascii_digit()) => {
-                                    (format!("{stage} ({p}%)"), NormalizedStatus::Processing)
-                                }
-                                _ => {
-                                    let raw = progress.unwrap_or_else(|| stage.clone());
-                                    let norm = NormalizedStatus::from_raw(&raw);
-                                    (raw, norm)
-                                }
-                            };
+                                num_received,
+                                audience_status,
+                                content_updated_at,
+                                now_unix,
+                            );
                             let extra = s
                                 .as_object()
                                 .map(|m| extra_from_object(m, &["session_id"]))
@@ -243,9 +300,9 @@ async fn fetch_sessions(
                                 operation: stage,
                                 status,
                                 normalized_status,
-                                created_at: parse_timestamp(s.get("start_time")),
+                                created_at: start_time,
                                 updated_at: end_time,
-                                count: json_u64(s, "num_received"),
+                                count: num_received,
                                 error: json_u64(s, "num_invalid_entries").and_then(|inv| {
                                     if inv > 0 {
                                         Some(format!("{inv} invalid entries"))
@@ -505,24 +562,35 @@ pub async fn collect(
                         })
                         .collect();
 
-                    let session_targets: Vec<(usize, String, Option<String>)> = filtered_list
+                    let session_targets: Vec<SessionTarget> = filtered_list
                         .iter()
                         .enumerate()
                         .map(|(idx, a)| {
-                            (
+                            let (_, audience_status) = map_audience_status(a);
+                            let content_updated_at = parse_timestamp(a.get("time_content_updated"));
+                            SessionTarget {
                                 idx,
-                                json_str(a, "id").unwrap_or_default(),
-                                json_str(a, "subtype"),
-                            )
+                                id: json_str(a, "id").unwrap_or_default(),
+                                subtype: json_str(a, "subtype"),
+                                audience_status,
+                                content_updated_at,
+                            }
                         })
                         .collect();
 
                     let session_results: Vec<(usize, Vec<OperationRecord>, bool, Option<String>)> =
                         stream::iter(session_targets)
-                            .map(|(idx, id, subtype)| async move {
-                                let (ops, more, err) =
-                                    fetch_sessions(client, cfg, &id, subtype.as_deref()).await;
-                                (idx, ops, more, err)
+                            .map(|t| async move {
+                                let (ops, more, err) = fetch_sessions(
+                                    client,
+                                    cfg,
+                                    &t.id,
+                                    t.subtype.as_deref(),
+                                    t.audience_status,
+                                    t.content_updated_at,
+                                )
+                                .await;
+                                (t.idx, ops, more, err)
                             })
                             .buffer_unordered(concurrency)
                             .collect()

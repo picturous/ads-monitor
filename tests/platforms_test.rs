@@ -174,6 +174,9 @@ async fn test_facebook_collects_account_insights_campaigns_audiences_and_session
         .mount(&server)
         .await;
 
+    let now_ts = Utc::now().timestamp();
+    let content_updated_ts = now_ts - 600;
+
     Mock::given(method("GET"))
         .and(path("/v25.0/act_12345/customaudiences"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -183,10 +186,11 @@ async fn test_facebook_collects_account_insights_campaigns_audiences_and_session
                     "name": "CRM Buyers",
                     "subtype": "CUSTOM",
                     "delivery_status": {"code": 200, "description": "Normal"},
-                    "operation_status": {"code": 100, "description": "Ready"},
+                    "operation_status": {"code": 200, "description": "Normal"},
                     "approximate_count_lower_bound": 12000,
                     "approximate_count_upper_bound": 15000,
-                    "time_updated": 1700005000
+                    "time_updated": content_updated_ts,
+                    "time_content_updated": content_updated_ts
                 },
                 {
                     "id": "aud_2",
@@ -217,8 +221,17 @@ async fn test_facebook_collects_account_insights_campaigns_audiences_and_session
                     "session_id": "998878",
                     "stage": "uploading",
                     "progress": "0",
+                    "start_time": now_ts - 60,
                     "end_time": "0",
                     "num_received": 10000
+                },
+                {
+                    "session_id": "998879",
+                    "stage": "uploading",
+                    "progress": "0",
+                    "start_time": content_updated_ts - 120,
+                    "end_time": "0",
+                    "num_received": 1000000
                 }
             ]
         })))
@@ -254,16 +267,26 @@ async fn test_facebook_collects_account_insights_campaigns_audiences_and_session
         report.audiences[0].matched_users.as_deref(),
         Some("12K–15K")
     );
-    assert_eq!(report.audiences[0].operations.len(), 2);
+    assert_eq!(report.audiences[0].operations.len(), 3);
     assert_eq!(
         report.audiences[0].operations[0].normalized_status,
         NormalizedStatus::Ready
     );
+    // Recent upload started after time_content_updated remains Processing
     assert_eq!(
         report.audiences[0].operations[1].normalized_status,
         NormalizedStatus::Processing
     );
     assert_eq!(report.audiences[0].operations[1].updated_at, None);
+    // Unclosed historical upload already reflected in time_content_updated is Ready (Succeeded)
+    assert_eq!(
+        report.audiences[0].operations[2].normalized_status,
+        NormalizedStatus::Ready
+    );
+    assert_eq!(
+        report.audiences[0].operations[2].status,
+        "uploading (ingested)"
+    );
     assert_eq!(
         report.audiences[1].normalized_status,
         NormalizedStatus::Failed
