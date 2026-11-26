@@ -530,6 +530,7 @@ async fn test_line_oa_stateless_token_issuance_and_audience_jobs() {
 
     Mock::given(method("GET"))
         .and(path("/v2/bot/audienceGroup/list"))
+        .and(query_param("description", "vip"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "audienceGroups": [
                 {

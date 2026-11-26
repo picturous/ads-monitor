@@ -10,12 +10,12 @@ use chrono::{Duration, FixedOffset, Utc};
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::{Duration as StdDuration, Instant};
 use tokio::sync::RwLock;
 
-const MAX_AUDIENCE_PAGES: usize = 15;
+const MAX_AUDIENCE_PAGES: usize = 50;
 
 #[derive(Clone)]
 struct CachedToken {
@@ -123,28 +123,45 @@ async fn line_get(
     }
 }
 
-async fn fetch_all_audience_groups(
+async fn fetch_audience_groups_page_loop(
     client: &Client,
     cfg: &LineOaConfig,
     token: &str,
+    description_filter: Option<&str>,
 ) -> Result<(Vec<Value>, bool), ApiError> {
     let mut items = Vec::new();
     let mut has_more = false;
 
     for page in 1..=MAX_AUDIENCE_PAGES {
         let page_str = page.to_string();
-        let res = line_get(
-            client,
-            cfg,
-            token,
-            "/v2/bot/audienceGroup/list",
-            &[
-                ("page", page_str.as_str()),
-                ("size", "40"),
-                ("includeOwnedAudienceGroups", "true"),
-            ],
-        )
-        .await?;
+        let res = if let Some(desc) = description_filter {
+            line_get(
+                client,
+                cfg,
+                token,
+                "/v2/bot/audienceGroup/list",
+                &[
+                    ("page", page_str.as_str()),
+                    ("size", "40"),
+                    ("includeOwnedAudienceGroups", "true"),
+                    ("description", desc),
+                ],
+            )
+            .await?
+        } else {
+            line_get(
+                client,
+                cfg,
+                token,
+                "/v2/bot/audienceGroup/list",
+                &[
+                    ("page", page_str.as_str()),
+                    ("size", "40"),
+                    ("includeOwnedAudienceGroups", "true"),
+                ],
+            )
+            .await?
+        };
 
         if let Some(groups) = res.get("audienceGroups").and_then(Value::as_array) {
             items.extend(groups.iter().cloned());
@@ -163,6 +180,64 @@ async fn fetch_all_audience_groups(
     }
 
     Ok((items, has_more))
+}
+
+async fn fetch_all_audience_groups(
+    client: &Client,
+    cfg: &LineOaConfig,
+    token: &str,
+    concurrency: usize,
+) -> Result<(Vec<Value>, bool), ApiError> {
+    // When audience_filter patterns are configured, leverage LINE OA's server-side
+    // case-insensitive `description` partial-match query per pattern concurrently so we
+    // search the entire catalog (even 1,000+ groups) in a few fast calls without truncation.
+    if cfg.options.has_audience_filter() {
+        let patterns = cfg.options.audience_filter.clone();
+        let results: Vec<Result<(Vec<Value>, bool), ApiError>> = stream::iter(patterns)
+            .map(|pat| async move {
+                fetch_audience_groups_page_loop(client, cfg, token, Some(pat.as_str())).await
+            })
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
+
+        let mut seen = HashSet::new();
+        let mut combined = Vec::new();
+        let mut any_more = false;
+        let mut first_err = None;
+        let mut any_ok = false;
+
+        for r in results {
+            match r {
+                Ok((groups, more)) => {
+                    any_ok = true;
+                    if more {
+                        any_more = true;
+                    }
+                    for g in groups {
+                        let id = json_str(&g, "audienceGroupId").unwrap_or_default();
+                        if id.is_empty() || seen.insert(id) {
+                            combined.push(g);
+                        }
+                    }
+                }
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+
+        if !any_ok {
+            if let Some(e) = first_err {
+                return Err(e);
+            }
+        }
+        return Ok((combined, any_more));
+    }
+
+    fetch_audience_groups_page_loop(client, cfg, token, None).await
 }
 
 async fn fetch_audience_jobs(
@@ -315,7 +390,7 @@ pub async fn collect(client: &Client, cfg: &LineOaConfig, concurrency: usize) ->
         },
         async {
             if cfg.options.enable_audiences {
-                Some(fetch_all_audience_groups(client, cfg, &token).await)
+                Some(fetch_all_audience_groups(client, cfg, &token, concurrency).await)
             } else {
                 None
             }
